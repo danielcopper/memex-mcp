@@ -54,7 +54,8 @@ class AuthConfig:
     scopes: tuple[str, ...] = ("openid", "profile", "offline_access")
     leeway_seconds: int = 30
     # A refetch of the key set for an unknown key id happens at most this long
-    # after the last successful fetch.
+    # after the last successful fetch, and a failed fetch is not tried again
+    # for this long.
     jwks_min_refetch_seconds: int = 60
     timeout_seconds: float = 5.0
 

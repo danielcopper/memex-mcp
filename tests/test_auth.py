@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -24,9 +25,10 @@ import jwt.jwk_set_cache
 import jwt.jwks_client
 import pytest
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from jwt.algorithms import RSAAlgorithm
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
+from jwt.algorithms import ECAlgorithm, OKPAlgorithm, RSAAlgorithm
 
+import memex_mcp.auth
 from memex_mcp.auth import JWKS_LIFESPAN_SECONDS, AuthentikTokenVerifier, identity_from
 
 ISSUER = "https://auth.example.org/application/o/memex/"
@@ -99,6 +101,8 @@ class FakeJwks:
         # Answers every fetch with this instead of the keys above.
         self.answer: Answer | None = None
         self.delay: float = 0.0
+        # Runs while a fetch is being answered.
+        self.on_fetch: Callable[[], None] = lambda: None
         jwks = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -109,14 +113,14 @@ class FakeJwks:
             def do_GET(self) -> None:
                 assert self.path == JWKS_PATH
                 jwks.fetches += 1
+                jwks.on_fetch()
                 time.sleep(jwks.delay)
-                if jwks.down:
-                    hang_up(self)
-                elif jwks.answer is not None:
-                    jwks.answer(self)
-                else:
-                    document = {"keys": [jwk_of(k, kid) for k, kid in jwks.keys]}
-                    answer_json(document)(self)
+                answer = jwks.answer or answer_json(
+                    {"keys": [jwk_of(k, kid) for k, kid in jwks.keys]}
+                )
+                # The client may have given up waiting.
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    (hang_up if jwks.down else answer)(self)
 
         self._server: ThreadingHTTPServer = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         # A short poll interval, since shutdown waits for the next poll.
@@ -152,13 +156,14 @@ class Clock:
 
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
-    """PyJWT's key set cache and refetch cooldown, on a clock the test moves.
+    """The key set cache, the refetch cooldown and the wait after a failed fetch, on a
+    clock the test moves.
 
-    These three modules are where PyJWT 2.15.1 reads ``time.monotonic`` for
-    them; only their name ``time`` is replaced, so any other use of it fails.
+    These are the modules that read ``time.monotonic`` for them (PyJWT's at
+    2.15.1); only their name ``time`` is replaced, so any other use of it fails.
     """
     fake = Clock()
-    for module in (jwt.jwks_client, jwt.jwk_set_cache, jwt.api_jwk):
+    for module in (jwt.jwks_client, jwt.jwk_set_cache, jwt.api_jwk, memex_mcp.auth):
         monkeypatch.setattr(module, "time", fake)
     return fake
 
@@ -193,7 +198,7 @@ def token(
 
 
 def make_verifier(
-    jwks: FakeJwks, algorithms: tuple[str, ...] = ("RS256", "ES256")
+    jwks: FakeJwks, algorithms: tuple[str, ...] = ("RS256", "ES256"), timeout: float = 1.0
 ) -> AuthentikTokenVerifier:
     return AuthentikTokenVerifier(
         issuer=ISSUER,
@@ -202,7 +207,7 @@ def make_verifier(
         algorithms=algorithms,
         leeway_seconds=30,
         jwks_min_refetch_seconds=MIN_REFETCH,
-        timeout_seconds=1.0,
+        timeout_seconds=timeout,
     )
 
 
@@ -383,6 +388,17 @@ async def test_a_cached_key_verifies_while_the_endpoint_is_down(
     assert jwks.fetches == 1
 
 
+REJECTED_UNFETCHED = (
+    "bearer token rejected: no signing key for kid 'k1': the key set could not be fetched"
+)
+ALL_REJECTED = "every token is rejected until a fetch succeeds"
+NO_FETCH_FOR = f"no new fetch for {MIN_REFETCH} s"
+
+
+def warnings_in(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+
 @pytest.mark.anyio
 async def test_an_expired_key_set_is_not_used_while_the_endpoint_is_down(
     jwks: FakeJwks, clock: Clock, caplog: pytest.LogCaptureFixture
@@ -391,9 +407,104 @@ async def test_an_expired_key_set_is_not_used_while_the_endpoint_is_down(
     assert await verifier.verify_token(token()) is not None
     jwks.down = True
     clock.now += JWKS_LIFESPAN_SECONDS + 1
-    with caplog.at_level(logging.WARNING, logger="memex_mcp.auth"):
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
         assert await verifier.verify_token(token()) is None
-    assert caplog.messages == [f"bearer token rejected: no signing key from {jwks.url}: {HUNG_UP}"]
+    assert caplog.messages == [
+        f"cannot load the key set from {jwks.url}: {HUNG_UP}; {ALL_REJECTED}; {NO_FETCH_FOR}",
+        REJECTED_UNFETCHED,
+    ]
+
+
+@pytest.mark.anyio
+async def test_a_failed_fetch_is_not_retried_before_the_cooldown(
+    jwks: FakeJwks, clock: Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    verifier = make_verifier(jwks)
+    assert await verifier.verify_token(token()) is not None
+    jwks.down = True
+    clock.now += JWKS_LIFESPAN_SECONDS + 1
+    with caplog.at_level(logging.WARNING, logger="memex_mcp.auth"):
+        for _ in range(5):
+            assert await verifier.verify_token(token()) is None
+        assert jwks.fetches == 2
+        clock.now += MIN_REFETCH - 1
+        assert await verifier.verify_token(token()) is None
+        assert jwks.fetches == 2
+        clock.now += 2
+        assert await verifier.verify_token(token()) is None
+        assert jwks.fetches == 3
+    assert len(warnings_in(caplog)) == 2
+    assert all(ALL_REJECTED in message for message in warnings_in(caplog))
+
+
+@pytest.mark.anyio
+async def test_the_wait_counts_from_the_failure(jwks: FakeJwks, clock: Clock) -> None:
+    """A fetch that takes as long as the cooldown does not let the next one through."""
+    verifier = make_verifier(jwks)
+    assert await verifier.verify_token(token()) is not None
+    clock.now += JWKS_LIFESPAN_SECONDS + 1
+    jwks.down = True
+
+    def slow_fetch() -> None:
+        clock.now += MIN_REFETCH
+
+    jwks.on_fetch = slow_fetch
+    assert await verifier.verify_token(token()) is None
+    assert await verifier.verify_token(token()) is None
+    assert jwks.fetches == 2
+
+
+@pytest.mark.anyio
+async def test_a_failed_fetch_never_extends_the_cached_set(jwks: FakeJwks, clock: Clock) -> None:
+    """A wait after a failed fetch never serves a key set past its lifespan."""
+    verifier = make_verifier(jwks)
+    assert await verifier.verify_token(token()) is not None
+    jwks.down = True
+    clock.now += JWKS_LIFESPAN_SECONDS - 1
+    assert await verifier.verify_token(token(kid="k9")) is None  # a refetch, which fails
+    assert jwks.fetches == 2
+    clock.now += 2
+    assert await verifier.verify_token(token()) is None
+    assert jwks.fetches == 2
+
+
+@pytest.mark.anyio
+async def test_unknown_kids_while_the_endpoint_hangs_cost_one_fetch(
+    jwks: FakeJwks, clock: Clock
+) -> None:
+    timeout = 0.2
+    verifier = make_verifier(jwks, timeout=timeout)
+    assert await verifier.verify_token(token()) is not None
+    clock.now += MIN_REFETCH + 1
+    jwks.delay = 2 * timeout
+    waited: list[float] = []
+
+    async def unknown_kid() -> None:
+        assert await verifier.verify_token(token(kid=uuid.uuid4().hex)) is None
+
+    async def cached_kid() -> None:
+        start = time.monotonic()
+        assert await verifier.verify_token(token()) is not None
+        waited.append(time.monotonic() - start)
+
+    async with anyio.create_task_group() as group:
+        for _ in range(5):
+            group.start_soon(unknown_kid)
+        group.start_soon(cached_kid)
+    assert jwks.fetches == 2
+    [cached_wait] = waited
+    assert cached_wait < 2 * timeout
+
+
+@pytest.mark.anyio
+async def test_a_slow_endpoint_times_out(jwks: FakeJwks, caplog: pytest.LogCaptureFixture) -> None:
+    timeout = 0.2
+    jwks.delay = 2 * timeout
+    with caplog.at_level(logging.WARNING, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks, timeout=timeout).verify_token(token()) is None
+    [warning] = warnings_in(caplog)
+    assert warning.startswith(f"cannot load the key set from {jwks.url}: {CONNECTION_ERROR}")
+    assert "timed out" in warning
 
 
 @pytest.mark.anyio
@@ -410,13 +521,40 @@ async def test_the_cooldown_limits_refetches_for_unknown_kids(jwks: FakeJwks, cl
 
 
 @pytest.mark.anyio
-async def test_jwks_endpoint_down_rejects_and_recovers(jwks: FakeJwks) -> None:
+async def test_jwks_endpoint_down_rejects_and_recovers(
+    jwks: FakeJwks, clock: Clock, caplog: pytest.LogCaptureFixture
+) -> None:
     jwks.down = True
     verifier = make_verifier(jwks)
     assert await verifier.verify_token(token()) is None
     jwks.down = False
-    assert await verifier.verify_token(token()) is not None
+    assert await verifier.verify_token(token()) is None  # still waiting after the failure
+    assert jwks.fetches == 1
+    clock.now += MIN_REFETCH
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        assert await verifier.verify_token(token()) is not None
     assert jwks.fetches == 2
+    assert caplog.messages[-1] == (
+        f"loaded the key set from {jwks.url} after 1 failed fetch(es); signing keys 'k1'"
+    )
+
+
+@pytest.mark.anyio
+async def test_a_changed_key_set_is_logged_once(
+    jwks: FakeJwks, clock: Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    verifier = make_verifier(jwks)
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        assert await verifier.verify_token(token()) is not None
+        jwks.keys.append((new_key(), "k2"))
+        for _ in range(2):
+            clock.now += JWKS_LIFESPAN_SECONDS + 1
+            assert await verifier.verify_token(token()) is not None
+    assert jwks.fetches == 3
+    assert caplog.messages == [
+        f"loaded the key set from {jwks.url}; signing keys 'k1'",
+        f"loaded the key set from {jwks.url}; signing keys 'k1', 'k2'",
+    ]
 
 
 @pytest.mark.anyio
@@ -436,7 +574,9 @@ async def test_concurrent_requests_fetch_the_key_set_once(jwks: FakeJwks) -> Non
 
 
 @pytest.mark.anyio
-async def test_encryption_keys_and_keys_without_alg_are_handled(jwks: FakeJwks) -> None:
+async def test_encryption_keys_and_keys_without_alg_are_handled(
+    jwks: FakeJwks, caplog: pytest.LogCaptureFixture
+) -> None:
     """Authentik lists an encryption key (use "enc") beside the signing key when one is set."""
     enc_key = new_key()
     signing = jwk_of(KEY, "k1")
@@ -446,9 +586,15 @@ async def test_encryption_keys_and_keys_without_alg_are_handled(jwks: FakeJwks) 
     encryption_without_alg = {**without(jwk_of(enc_key, "e2"), "alg"), "use": "enc"}
     jwks.answer = answer_json({"keys": [encryption, encryption_without_alg, signing]})
     verifier = make_verifier(jwks, algorithms=("RS256",))
-    assert await verifier.verify_token(token()) is not None
-    assert await verifier.verify_token(token(key=enc_key, kid="e1")) is None
-    assert await verifier.verify_token(token(key=enc_key, kid="e2")) is None
+    with caplog.at_level(logging.DEBUG, logger="memex_mcp.auth"):
+        assert await verifier.verify_token(token()) is not None
+        assert await verifier.verify_token(token(key=enc_key, kid="e1")) is None
+        assert await verifier.verify_token(token(key=enc_key, kid="e2")) is None
+    assert warnings_in(caplog) == []
+    assert caplog.messages[:2] == [
+        "key set entry 0 (kid 'e1', kty 'RSA', alg 'RSA-OAEP-256') is an encryption key; not used",
+        "key set entry 1 (kid 'e2', kty 'RSA', alg null) is an encryption key; not used",
+    ]
 
 
 def without(jwk: dict[str, object], name: str) -> dict[str, object]:
@@ -479,7 +625,9 @@ async def test_a_null_alg_counts_as_absent(jwks: FakeJwks) -> None:
 
 
 @pytest.mark.anyio
-async def test_a_malformed_entry_does_not_hide_the_good_key(jwks: FakeJwks) -> None:
+async def test_a_malformed_entry_does_not_hide_the_good_key(
+    jwks: FakeJwks, caplog: pytest.LogCaptureFixture
+) -> None:
     jwks.answer = answer_json(
         {
             "keys": [
@@ -487,20 +635,95 @@ async def test_a_malformed_entry_does_not_hide_the_good_key(jwks: FakeJwks) -> N
                 {**GOOD_JWK, "kid": ["k1"]},
                 {**GOOD_JWK, "alg": 5, "kid": "k2"},
                 {**without(GOOD_JWK, "kty"), "kid": "k3"},
+                {**GOOD_JWK, "use": "foo", "kid": "k4"},
+                without(GOOD_JWK, "kid"),
                 GOOD_JWK,
             ]
         }
     )
-    assert await make_verifier(jwks).verify_token(token()) is not None
+    verifier = make_verifier(jwks)
+    with caplog.at_level(logging.WARNING, logger="memex_mcp.auth"):
+        for _ in range(2):
+            assert await verifier.verify_token(token()) is not None
+    assert jwks.fetches == 1
+    # A kid that is not a string still makes a signing key; it matches no token.
+    assert warnings_in(caplog) == [
+        "key set entry 0 is a number, not an object; not used",
+        "key set entry 2 (kid 'k2', kty 'RSA', alg a number) is unusable: PyJWKError; not used",
+        "key set entry 3 (kid 'k3', kty null, alg 'RS256') is unusable: InvalidKeyError; not used",
+        "key set entry 4 (kid 'k4', kty 'RSA', alg 'RS256') has use 'foo', not 'sig'; not used",
+        "key set entry 5 (kid null, kty 'RSA', alg 'RS256') has no kid; not used",
+    ]
+
+
+VALUES: dict[str, object] = {
+    "null": None,
+    "integer": 5,
+    "float": 1.5,
+    "true": True,
+    "list": [1],
+    "object": {},
+    "empty": "",
+    "not base64": "!!!",
+}
+MISSING = "missing"
+
+
+def fuzz_bases() -> dict[str, dict[str, object]]:
+    """One key of each type PyJWT knows, kid k0, as a provider would list it."""
+    rsa_jwk = RSAAlgorithm.to_jwk(new_key().public_key(), as_dict=True)
+    ec_jwk = ECAlgorithm.to_jwk(ec.generate_private_key(ec.SECP256R1()).public_key(), as_dict=True)
+    okp_key = ed25519.Ed25519PrivateKey.generate().public_key()
+    okp_jwk = OKPAlgorithm.to_jwk(okp_key, as_dict=True)
+    oct_jwk = {"kty": "oct", "k": "c2VjcmV0"}
+    entries = {
+        "RSA": (rsa_jwk, "RS256"),
+        "EC": (ec_jwk, "ES256"),
+        "OKP": (okp_jwk, "EdDSA"),
+        "oct": (oct_jwk, "HS256"),
+    }
+    return {
+        kty: {**jwk, "kid": "k0", "alg": alg, "use": "sig"} for kty, (jwk, alg) in entries.items()
+    }
+
+
+FUZZ_BASES = fuzz_bases()
+FUZZ_CASES = [
+    (kty, member, value)
+    for kty, base in FUZZ_BASES.items()
+    for member in base
+    for value in [*VALUES, MISSING]
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("kty", "member", "value"),
+    FUZZ_CASES,
+    ids=[f"{kty}-{member}-{value}" for kty, member, value in FUZZ_CASES],
+)
+async def test_a_malformed_member_never_escapes(
+    jwks: FakeJwks, kty: str, member: str, value: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every member of every key type, broken beside a good key: rejected or verified, logged."""
+    entry = without(FUZZ_BASES[kty], member)
+    if value != MISSING:
+        entry[member] = VALUES[value]
+    jwks.answer = answer_json({"keys": [entry, GOOD_JWK]})
+    with caplog.at_level(logging.DEBUG, logger="memex_mcp.auth"):
+        verified = await make_verifier(jwks).verify_token(token())
+    warnings = warnings_in(caplog)
+    assert len(warnings) <= 1
+    # A rejection always says why.
+    assert verified is not None or len(warnings) == 1
 
 
 HINT = "; is [auth] jwks_url the provider's JWKS endpoint?"
-NO_SIGNING_KEYS = "PyJWKClientError: The JWKS endpoint did not contain any signing keys"
 NO_USABLE_KEYS = "PyJWKSetError: The JWK Set did not contain any usable keys."
 
 # What the endpoint answers -> the cause the warning names, and whether the
 # endpoint answered, but not with a usable key set (the jwks_url hint).
-LOOKUP_FAILURES: dict[str, tuple[Answer, str, bool]] = {
+FETCH_FAILURES: dict[str, tuple[Answer, str, bool]] = {
     "not JSON": (answer_raw(b"<html>login</html>"), "JSONDecodeError: Expecting value", True),
     "not UTF-8": (answer_raw(b"\xff\xfe\x00"), "UnicodeDecodeError: ", True),
     "nested too deeply": (answer_raw(b"[" * 100_000), "RecursionError: maximum recursion", True),
@@ -523,12 +746,6 @@ LOOKUP_FAILURES: dict[str, tuple[Answer, str, bool]] = {
     "no usable key": (answer_json({"keys": [without(GOOD_JWK, "kty")]}), NO_USABLE_KEYS, True),
     "entries not objects": (answer_json({"keys": [5, None, "k1"]}), NO_USABLE_KEYS, True),
     "encryption key only": (answer_json({"keys": [ENC_JWK]}), NO_USABLE_KEYS, True),
-    "only keys marked enc": (
-        answer_json({"keys": [{**GOOD_JWK, "use": "enc"}]}),
-        NO_SIGNING_KEYS,
-        True,
-    ),
-    "keys without kid": (answer_json({"keys": [without(GOOD_JWK, "kid")]}), NO_SIGNING_KEYS, True),
     "alg none beside a good key": (
         answer_json({"keys": [{**GOOD_JWK, "alg": "none", "kid": "k0"}, GOOD_JWK]}),
         "NotImplementedError: no detail",
@@ -537,6 +754,11 @@ LOOKUP_FAILURES: dict[str, tuple[Answer, str, bool]] = {
     "alg a list beside a good key": (
         answer_json({"keys": [{**GOOD_JWK, "alg": ["RS256"], "kid": "k0"}, GOOD_JWK]}),
         "TypeError: unhashable type: 'list'",
+        True,
+    ),
+    "oct key without k beside a good key": (
+        answer_json({"keys": [{"kty": "oct", "kid": "k0"}, GOOD_JWK]}),
+        "KeyError: 'k'",
         True,
     ),
     "not found": (
@@ -556,32 +778,61 @@ LOOKUP_FAILURES: dict[str, tuple[Answer, str, bool]] = {
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("answer", "cause", "hint"), LOOKUP_FAILURES.values(), ids=list(LOOKUP_FAILURES)
+    ("answer", "cause", "hint"), FETCH_FAILURES.values(), ids=list(FETCH_FAILURES)
 )
-async def test_a_failed_key_lookup_rejects_the_token_with_one_warning(
+async def test_a_failed_fetch_rejects_the_token_with_one_warning(
     jwks: FakeJwks, answer: Answer, cause: str, hint: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
     jwks.answer = answer
     bearer = token()
     with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
         assert await make_verifier(jwks).verify_token(bearer) is None
-    [record] = caplog.records
-    assert record.levelno == logging.WARNING
-    message = record.getMessage()
-    assert message.startswith(f"bearer token rejected: no signing key from {jwks.url}: {cause}")
-    assert message.count(jwks.url) == 1
-    assert message.endswith(HINT) is hint
+    [warning] = warnings_in(caplog)
+    assert warning.startswith(f"cannot load the key set from {jwks.url}: {cause}")
+    assert warning.count(jwks.url) == 1
+    assert (HINT in warning) is hint
+    assert warning.endswith(f"; {ALL_REJECTED}; {NO_FETCH_FOR}")
+    assert caplog.messages[-1] == REJECTED_UNFETCHED
     assert bearer not in caplog.text
 
 
 @pytest.mark.anyio
-async def test_an_unknown_kid_names_the_kid_without_the_hint(
+@pytest.mark.parametrize(
+    "entry",
+    [{**GOOD_JWK, "use": "enc"}, without(GOOD_JWK, "kid")],
+    ids=["only a key marked enc", "only a key without kid"],
+)
+async def test_a_key_set_without_signing_keys_is_reported(
+    jwks: FakeJwks, entry: dict[str, object], caplog: pytest.LogCaptureFixture
+) -> None:
+    jwks.answer = answer_json({"keys": [entry]})
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(token()) is None
+    assert warnings_in(caplog)[-1] == (
+        f"the key set from {jwks.url} has no signing key: every token is rejected for "
+        + f"{JWKS_LIFESPAN_SECONDS} s{HINT}"
+    )
+    assert caplog.messages[-1] == "bearer token rejected: no signing key for kid 'k1'"
+
+
+@pytest.mark.anyio
+async def test_an_unknown_kid_is_logged_at_info(
     jwks: FakeJwks, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
         assert await make_verifier(jwks).verify_token(token(kid="k9")) is None
-    unknown = 'PyJWKClientError: Unable to find a signing key that matches: "k9"'
-    assert caplog.messages == [f"bearer token rejected: no signing key from {jwks.url}: {unknown}"]
+    assert caplog.messages == [
+        f"loaded the key set from {jwks.url}; signing keys 'k1'",
+        "bearer token rejected: no signing key for kid 'k9'",
+    ]
+    assert warnings_in(caplog) == []
+
+
+@pytest.mark.anyio
+async def test_a_long_kid_is_clipped(jwks: FakeJwks, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(token(kid="x" * 20_000)) is None
+    assert caplog.messages[-1] == f"bearer token rejected: no signing key for kid '{'x' * 64}…'"
 
 
 @pytest.mark.anyio
@@ -590,9 +841,8 @@ async def test_a_kid_cannot_forge_a_log_line(
 ) -> None:
     with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
         assert await make_verifier(jwks).verify_token(token(kid="k9\nforged")) is None
-    [message] = caplog.messages
-    assert "\n" not in message
-    assert message.endswith('matches: "k9\\nforged"')
+    assert not any("\n" in message for message in caplog.messages)
+    assert caplog.messages[-1].endswith("kid 'k9\\nforged'")
 
 
 @pytest.mark.anyio
@@ -618,13 +868,19 @@ async def test_a_private_key_in_the_set_never_reaches_the_log(
     ids=["keys empty", "not JSON", "endpoint down"],
 )
 async def test_a_bad_refetch_keeps_the_cached_key_set(
-    jwks: FakeJwks, clock: Clock, bad_answer: Answer
+    jwks: FakeJwks, clock: Clock, bad_answer: Answer, caplog: pytest.LogCaptureFixture
 ) -> None:
     verifier = make_verifier(jwks)
     assert await verifier.verify_token(token()) is not None
     jwks.answer = bad_answer
     clock.now += MIN_REFETCH + 1
-    assert await verifier.verify_token(token(key=new_key(), kid="k2")) is None
+    with caplog.at_level(logging.WARNING, logger="memex_mcp.auth"):
+        assert await verifier.verify_token(token(key=new_key(), kid="k2")) is None
     assert jwks.fetches == 2
     assert await verifier.verify_token(token()) is not None
     assert jwks.fetches == 2
+    left = JWKS_LIFESPAN_SECONDS - MIN_REFETCH - 1
+    [warning] = warnings_in(caplog)
+    assert warning.endswith(
+        f"; the cached key set stays in use for another {left} s; {NO_FETCH_FOR}"
+    )
