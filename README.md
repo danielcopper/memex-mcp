@@ -98,11 +98,14 @@ Create an application `memex` with an **OAuth2/OpenID provider**:
 - **Redirect URIs:** `http://localhost:<port>/callback`, strict, with the port you give Claude Code as
   `--callback-port`.
 - **Signing key:** select a key pair; Authentik lists them under **System > Certificates**. Only the key pair matters:
-  Authentik signs the tokens with the private key and publishes the public key in the provider's JWKS, and the
-  certificate Authentik stores with the key plays no part. RSA with at least 2048 bits (RS256) and EC P-256 (ES256) are
-  both fine; they are the algorithms `auth.algorithms` accepts by default. Generate a key pair for this provider alone,
-  so it can be rotated without touching other applications. Without a signing key Authentik signs with HS256 and the
-  client secret and publishes no JWKS, which this server does not accept. Leave **Encryption key** empty.
+  Authentik signs the tokens with the private key and publishes the public key in the provider's JWKS. The certificate
+  Authentik stores with the key plays no part in verification; Authentik also puts it into the JWKS as `x5c`, which this
+  server ignores. RSA with at least 2048 bits (RS256) and EC P-256 (ES256) are both fine; they are the algorithms
+  `auth.algorithms` accepts by default. Generate a key pair for this provider alone, so it can be rotated without
+  touching other applications, and pick RSA or ECDSA (P-256) in the form: Ed25519 and Ed448 keys sign EdDSA tokens, and
+  imported P-384 or P-521 keys sign ES384 or ES512, which the default `auth.algorithms` rejects. Without a signing key
+  Authentik signs with HS256 and the client secret and publishes no JWKS, which this server does not accept. Leave
+  **Encryption key** empty.
 - **Scopes:** the default mappings `openid`, `profile` (carries `preferred_username` and `groups`) and `offline_access`
   (refresh tokens).
 - **Include claims in id_token:** on (the default). Authentik builds the access token from the same claims, so with this
