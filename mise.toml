@@ -21,6 +21,10 @@ run = ["ruff check .", "ruff format --check ."]
 description = "Type-check (basedpyright, zero warnings)"
 run = "basedpyright --warnings"
 
+[tasks.complexity]
+description = "Report every function whose cognitive complexity is over 15"
+run = "python scripts/cognitive_complexity.py"
+
 [tasks.serve]
 description = "Run the server with the config named in MEMEX_CONFIG"
 run = "memex-mcp"

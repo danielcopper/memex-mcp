@@ -170,7 +170,11 @@ def test_search_drops_rows_of_foreign_areas_even_if_the_index_returns_them(
     every = memex.index.keyword_ranked(
         MARKER, frozenset({"alice", "bob", "household", "carol"}), 50
     )
-    monkeypatch.setattr(memex.index, "keyword_ranked", lambda *_args: every)
+
+    def every_area(*_args: object) -> list[list[int]]:
+        return every
+
+    monkeypatch.setattr(memex.index, "keyword_ranked", every_area)
     result = memex.search(ALICE, MARKER, limit=50)
     assert {hit["area"] for hit in result["hits"]} == {"alice", "household"}
 

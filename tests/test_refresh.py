@@ -14,7 +14,7 @@ import pytest
 
 import memex_mcp.index as index_module
 from memex_mcp.index import SCHEMA_VERSION
-from memex_mcp.markdown import Chunk
+from memex_mcp.markdown import Chunk, chunk_note
 from memex_mcp.repo import GitError, GitRepo, redact
 from memex_mcp.rights import Identity
 from memex_mcp.service import Memex
@@ -257,7 +257,7 @@ POISON = "POISON"
 
 def _fail_after_first_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make chunking of a poisoned note fail after its first chunk was written."""
-    real = index_module.chunk_note
+    real = chunk_note
 
     def flaky(text: str, max_chars: int) -> Iterator[Chunk]:
         chunks = real(text, max_chars)

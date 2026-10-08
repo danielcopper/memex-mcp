@@ -162,6 +162,7 @@ In the config, set `repo.path = "/data/clone"` and `index.path = "/data/index/me
 mise run setup      # editable install + dev tools into .venv
 mise run lint       # ruff check + ruff format --check
 mise run typecheck  # basedpyright, zero warnings
+mise run complexity # cognitive complexity of every function at most 15
 mise run test       # pytest, no network
 ```
 

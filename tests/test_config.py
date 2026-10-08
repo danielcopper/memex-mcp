@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -68,7 +67,7 @@ def test_explicit_jwks_url_wins(tmp_path: Path) -> None:
     ],
 )
 def test_required_settings(tmp_path: Path, section: str, key: str) -> None:
-    raw: dict[str, Any] = raw_config(tmp_path)
+    raw = raw_config(tmp_path)
     del raw[section][key]
     with pytest.raises(ConfigError, match=key):
         build_config(raw, {})
@@ -94,3 +93,24 @@ def test_missing_or_broken_file(tmp_path: Path) -> None:
     broken.write_text("[server\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="not valid TOML"):
         load_config(broken, env={})
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value", "message"),
+    [
+        ("server", "port", [8000], "must be an integer"),
+        ("server", "port", {"value": 8000}, "must be an integer"),
+        ("index", "archive_factor", [0.5], "must be a number"),
+        ("embeddings", "enabled", 1, "must be a boolean"),
+        ("auth", "client_ids", ["claude-code", 7], "must be a list of strings"),
+        ("auth", "client_ids", 7, "must be a list of strings"),
+        ("server", "host", 5, "must be a string"),
+    ],
+)
+def test_values_of_the_wrong_type_are_refused(
+    tmp_path: Path, section: str, key: str, value: object, message: str
+) -> None:
+    raw = raw_config(tmp_path)
+    raw[section][key] = value
+    with pytest.raises(ConfigError, match=rf"^\[{section}\] {key} {message}$"):
+        build_config(raw, {})

@@ -14,6 +14,7 @@ from memex_mcp.service import (
     NOTICE_UNAVAILABLE,
     InvalidRequest,
     Memex,
+    SearchResult,
     make_snippet,
 )
 from tests.conftest import (
@@ -27,7 +28,7 @@ from tests.conftest import (
 
 class Clock:
     def __init__(self) -> None:
-        self.now = 100.0
+        self.now: float = 100.0
 
     def __call__(self) -> float:
         return self.now
@@ -49,10 +50,8 @@ def hybrid(tmp_path: Path, origin: Origin) -> Iterator[Memex]:
     memex.index.close()
 
 
-def paths(result: dict[str, object]) -> list[str]:
-    hits = result["hits"]
-    assert isinstance(hits, list)
-    return [hit["path"] for hit in hits]
+def paths(result: SearchResult) -> list[str]:
+    return [hit["path"] for hit in result["hits"]]
 
 
 def test_keyword_ranking_puts_the_best_match_first(memex: Memex) -> None:
@@ -117,7 +116,7 @@ def test_failing_embedder_falls_back_to_keywords(tmp_path: Path, origin: Origin)
     try:
         result = memex.search(ALICE, "degreaser")
         assert result["semantic"] is False
-        assert result["notice"] == NOTICE_UNAVAILABLE
+        assert result.get("notice") == NOTICE_UNAVAILABLE
         assert paths(result)[0] == "alice/memory/bike-repair.md"
     finally:
         memex.index.close()
@@ -144,7 +143,7 @@ def test_after_a_failure_the_embedder_rests_for_a_while(tmp_path: Path, origin: 
 def test_disabled_embeddings_say_so(memex: Memex) -> None:
     result = memex.search(ALICE, "degreaser")
     assert result["semantic"] is False
-    assert result["notice"] == NOTICE_DISABLED
+    assert result.get("notice") == NOTICE_DISABLED
 
 
 def test_empty_query_is_refused(memex: Memex) -> None:

@@ -8,12 +8,12 @@ import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import cast, override
 
 import pytest
 
 from memex_mcp.config import Config, build_config
-from memex_mcp.embed import EmbeddingError
+from memex_mcp.embed import Embedder, EmbeddingError
 from memex_mcp.rights import Identity
 from memex_mcp.service import Memex
 
@@ -111,7 +111,7 @@ def origin(tmp_path: Path) -> Origin:
     return result
 
 
-def raw_config(tmp_path: Path, origin: Origin | None = None) -> dict[str, Any]:
+def raw_config(tmp_path: Path, origin: Origin | None = None) -> dict[str, dict[str, object]]:
     return {
         "server": {"public_url": "https://memex.example.org"},
         "auth": {
@@ -133,7 +133,9 @@ def raw_config(tmp_path: Path, origin: Origin | None = None) -> dict[str, Any]:
     }
 
 
-def make_config(tmp_path: Path, origin: Origin | None = None, **sections: dict[str, Any]) -> Config:
+def make_config(
+    tmp_path: Path, origin: Origin | None = None, **sections: dict[str, object]
+) -> Config:
     raw = raw_config(tmp_path, origin)
     for name, values in sections.items():
         raw.setdefault(name, {}).update(values)
@@ -149,22 +151,23 @@ CONCEPTS: dict[str, int] = {
 }  # fmt: skip
 
 
-class FakeEmbedder:
+class FakeEmbedder(Embedder):
     """Deterministic embeddings: one dimension per concept, the rest hashed."""
 
-    model = "fake-embedder"
-    dimensions = 16
+    model: str = "fake-embedder"
+    dimensions: int = 16
 
     def __init__(self) -> None:
-        self.calls = 0
+        self.calls: int = 0
 
+    @override
     def embed(self, texts: list[str], timeout: float) -> list[list[float]]:
         self.calls += 1
         vectors: list[list[float]] = []
         for text in texts:
             vector = [0.0] * self.dimensions
             vector[-1] = 0.01  # never the zero vector
-            for word in re.findall(r"\w+", text.lower()):
+            for word in cast("list[str]", re.findall(r"\w+", text.lower())):
                 if word in CONCEPTS:
                     vector[CONCEPTS[word]] += 1.0
                 else:
@@ -174,7 +177,7 @@ class FakeEmbedder:
 
 
 @dataclass
-class FailingEmbedder:
+class FailingEmbedder(Embedder):
     """An embedder whose host is down."""
 
     model: str = "fake-embedder"
@@ -183,6 +186,7 @@ class FailingEmbedder:
     message: str = "ConnectError: connection refused"
     texts: list[str] = field(default_factory=list[str])
 
+    @override
     def embed(self, texts: list[str], timeout: float) -> list[list[float]]:
         self.calls += 1
         self.texts.extend(texts)

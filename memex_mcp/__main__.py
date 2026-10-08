@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from typing import cast
 
 import uvicorn
 
@@ -19,9 +20,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", help="the config file (default: $MEMEX_CONFIG)")
     args = parser.parse_args(argv)
     try:
-        config = load_config(args.config)
+        config = load_config(cast("str | None", args.config))
     except ConfigError as exc:
-        print(f"memex-mcp: {exc}", file=sys.stderr)
+        sys.stderr.write(f"memex-mcp: {exc}\n")
         return 2
     logging.basicConfig(
         level=config.server.log_level.upper(),

@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Iterable
+from typing import cast, override
 
 import anyio
 import httpx2
@@ -34,10 +34,19 @@ GROUPS_CLAIM = "groups"
 REQUIRED_CLAIMS = ["exp", "iat", "iss", "aud", "sub"]
 
 
+def _key_entries(document: object) -> Iterable[object]:
+    """The ``keys`` of a JWKS document as they come; none when the document is no object."""
+    if not isinstance(document, dict):
+        return []
+    # A JSON object's keys are strings. A ``keys`` value that is not iterable
+    # raises TypeError when iterated, as it did before this was typed.
+    return cast("Iterable[object]", cast("dict[str, object]", document).get("keys", []))
+
+
 class AuthentikTokenVerifier(TokenVerifier):
     """Validates Authentik-issued JWT access tokens with the provider's JWKS."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - keyword-only: every setting is named where it is passed
         self,
         *,
         issuer: str,
@@ -51,28 +60,31 @@ class AuthentikTokenVerifier(TokenVerifier):
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         super().__init__()
-        self.issuer = issuer
-        self.jwks_url = jwks_url
-        self.client_ids = client_ids
-        self.algorithms = algorithms
-        self.leeway = leeway_seconds
-        self.min_refetch = jwks_min_refetch_seconds
-        self.timeout = timeout_seconds
-        self._transport = transport
-        self._clock = clock
+        self.issuer: str = issuer
+        self.jwks_url: str = jwks_url
+        self.client_ids: tuple[str, ...] = client_ids
+        self.algorithms: tuple[str, ...] = algorithms
+        self.leeway: int = leeway_seconds
+        self.min_refetch: int = jwks_min_refetch_seconds
+        self.timeout: float = timeout_seconds
+        self._transport: httpx2.AsyncBaseTransport | None = transport
+        self._clock: Callable[[], float] = clock
         self._keys: dict[str | None, jwt.PyJWK] = {}
         self._fetched_at: float | None = None
-        self._fetch_lock = anyio.Lock()
+        self._fetch_lock: anyio.Lock = anyio.Lock()
 
     async def _fetch_keys(self) -> None:
         async with httpx2.AsyncClient(transport=self._transport, timeout=self.timeout) as client:
             response = await client.get(self.jwks_url)
             response.raise_for_status()
-            document = response.json()
+            document = cast("object", response.json())
         keys: dict[str | None, jwt.PyJWK] = {}
-        for data in document.get("keys", []) if isinstance(document, dict) else []:
+        for entry in _key_entries(document):
+            if not isinstance(entry, dict):
+                continue
+            data = cast("dict[str, object]", entry)  # a JSON object's keys are strings
             # Authentik also lists the encryption key (use "enc") when one is set.
-            if not isinstance(data, dict) or data.get("use", "sig") != "sig":
+            if data.get("use", "sig") != "sig":
                 continue
             try:
                 key = jwt.PyJWK(data)
@@ -101,17 +113,20 @@ class AuthentikTokenVerifier(TokenVerifier):
             return next(iter(self._keys.values()))
         return None
 
+    @override
     async def verify_token(self, token: str) -> AccessToken | None:
         try:
-            header = jwt.get_unverified_header(token)
+            header: dict[str, object] = jwt.get_unverified_header(token)
         except jwt.PyJWTError:
             log.info("bearer token rejected: not a JWT")
             return None
-        if header.get("alg") not in self.algorithms:
-            log.info("bearer token rejected: algorithm %r not allowed", header.get("alg"))
+        alg = header.get("alg")
+        # Every allowed algorithm is a string, so the type check rejects nothing more.
+        if not isinstance(alg, str) or alg not in self.algorithms:
+            log.info("bearer token rejected: algorithm %r not allowed", alg)
             return None
-        alg = header["alg"]
-        key = await self._key_for(header.get("kid"))
+        # PyJWT has already refused a token whose `kid` header is not a string.
+        key = await self._key_for(cast("str | None", header.get("kid")))
         if key is None:
             log.info("bearer token rejected: no signing key for kid %r", header.get("kid"))
             return None
@@ -121,21 +136,24 @@ class AuthentikTokenVerifier(TokenVerifier):
             log.info("bearer token rejected: %s token for a %s key", alg, key.algorithm_name)
             return None
         try:
-            claims: dict[str, Any] = jwt.decode(
-                token,
-                key=key.key,
-                algorithms=[alg],
-                audience=list(self.client_ids),
-                issuer=self.issuer,
-                leeway=self.leeway,
-                options={"require": REQUIRED_CLAIMS},
+            claims = cast(
+                "dict[str, object]",
+                jwt.decode(
+                    token,
+                    key=key.key,  # pyright: ignore[reportAny] - PyJWT types PyJWK.key as Any
+                    algorithms=[alg],
+                    audience=list(self.client_ids),
+                    issuer=self.issuer,
+                    leeway=self.leeway,
+                    options={"require": REQUIRED_CLAIMS},
+                ),
             )
         except jwt.PyJWTError as exc:
             log.info("bearer token rejected: %s", exc)
             return None
         return self._access_token(token, claims)
 
-    def _access_token(self, token: str, claims: dict[str, Any]) -> AccessToken | None:
+    def _access_token(self, token: str, claims: dict[str, object]) -> AccessToken | None:
         azp = claims.get("azp")
         if azp not in self.client_ids:
             # Authentik puts `azp` only into access tokens, so this also keeps
@@ -147,7 +165,9 @@ class AuthentikTokenVerifier(TokenVerifier):
         if not isinstance(username, str) or not username:
             log.info("bearer token rejected: no %s claim", USERNAME_CLAIM)
             return None
-        if not isinstance(groups, list) or not all(isinstance(g, str) for g in groups):
+        if not isinstance(groups, list) or not all(
+            isinstance(g, str) for g in cast("list[object]", groups)
+        ):
             log.info("bearer token rejected for %s: no %s claim", username, GROUPS_CLAIM)
             return None
         scope = claims.get("scope")
@@ -155,7 +175,8 @@ class AuthentikTokenVerifier(TokenVerifier):
             token=token,
             client_id=str(azp),
             scopes=scope.split() if isinstance(scope, str) else [],
-            expires_at=int(claims["exp"]),
+            # PyJWT has already checked that `exp` converts to an integer.
+            expires_at=int(cast("int | float | str", claims["exp"])),
             subject=str(claims["sub"]),
             claims=claims,
         )
@@ -169,4 +190,6 @@ def identity_from(token: AccessToken | None) -> Identity:
     groups = token.claims.get(GROUPS_CLAIM)
     if not isinstance(username, str) or not isinstance(groups, list):
         raise PermissionError("the token carries no identity")
-    return Identity(username=username, groups=frozenset(str(g) for g in groups))
+    return Identity(
+        username=username, groups=frozenset(str(g) for g in cast("list[object]", groups))
+    )

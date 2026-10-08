@@ -1,14 +1,10 @@
 {
   "pythonVersion": "3.12",
-  "typeCheckingMode": "standard",
-  "include": ["memex_mcp", "tests"],
+  // Every rule on but the one below; `mise run typecheck` fails on a warning too.
+  "typeCheckingMode": "recommended",
+  "include": ["memex_mcp", "scripts", "tests"],
   "exclude": [".venv", "build", ".claude"],
-  "reportMissingModuleSource": "none",
-  "reportMissingImports": "error",
-  "reportPrivateUsage": "error",
-  "reportUnusedImport": "error",
-  "reportUnusedVariable": "error",
-  "reportUnnecessaryComparison": "error",
-  "reportUnnecessaryIsInstance": "error",
-  "reportMissingTypeArgument": "error"
+  // Off: the results dropped here are dropped by design (cursors of SQL writes, git run for its
+  // effect, calls inside pytest.raises); unawaited coroutines stay errors (reportUnusedCoroutine).
+  "reportUnusedCallResult": "none"
 }
