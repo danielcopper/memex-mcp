@@ -18,7 +18,15 @@ from memex_mcp.markdown import Chunk, chunk_note
 from memex_mcp.repo import GitError, GitRepo, redact
 from memex_mcp.rights import Identity
 from memex_mcp.service import Memex
-from tests.conftest import ALICE, FailingEmbedder, FakeEmbedder, Origin, git, make_config
+from tests.conftest import (
+    ALICE,
+    FailingEmbedder,
+    FakeEmbedder,
+    Origin,
+    git,
+    make_config,
+    malformed_ollama,
+)
 
 
 def paths(memex: Memex, query: str) -> list[str]:
@@ -159,6 +167,18 @@ def test_new_chunks_get_vectors_and_a_failed_round_resumes(tmp_path: Path, origi
         assert memex.index.missing_vectors(10) == []
     finally:
         memex.index.close()
+
+
+def test_a_malformed_embedder_answer_pauses_embedding(tmp_path: Path, origin: Origin) -> None:
+    embedder = malformed_ollama()
+    memex = Memex.from_config(make_config(tmp_path, origin), embedder=embedder)
+    memex.prepare()
+    try:
+        assert memex.backfill() == 0
+        assert len(memex.index.missing_vectors(10)) > 0
+    finally:
+        memex.index.close()
+        embedder.close()
 
 
 def test_a_different_embedding_model_drops_the_vectors(tmp_path: Path, origin: Origin) -> None:

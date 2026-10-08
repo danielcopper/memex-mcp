@@ -23,6 +23,7 @@ from tests.conftest import (
     FakeEmbedder,
     Origin,
     make_config,
+    malformed_ollama,
 )
 
 
@@ -138,6 +139,19 @@ def test_after_a_failure_the_embedder_rests_for_a_while(tmp_path: Path, origin: 
         assert embedder.calls == 2
     finally:
         memex.index.close()
+
+
+def test_a_malformed_embedder_answer_falls_back_to_keywords(tmp_path: Path, origin: Origin) -> None:
+    embedder = malformed_ollama()
+    memex = service(tmp_path, origin, embedder)
+    try:
+        result = memex.search(ALICE, "degreaser")
+        assert result["semantic"] is False
+        assert result.get("notice") == NOTICE_UNAVAILABLE
+        assert paths(result)[0] == "alice/memory/bike-repair.md"
+    finally:
+        memex.index.close()
+        embedder.close()
 
 
 def test_disabled_embeddings_say_so(memex: Memex) -> None:

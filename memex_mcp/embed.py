@@ -61,8 +61,11 @@ class OllamaEmbedder:
                 raise EmbeddingError(
                     f"the embedder returned a vector without {self.dimensions} dimensions"
                 )
-            # Typed as the numbers it should hold; each value goes through float() as before.
-            result.append([float(value) for value in cast("list[float]", vector)])
+            values = cast("list[object]", vector)
+            # A JSON number arrives as int or float; bool is an int subclass but a JSON true/false.
+            if not all(isinstance(v, int | float) and not isinstance(v, bool) for v in values):
+                raise EmbeddingError("the embedder returned a vector value that is not a number")
+            result.append([float(cast("float", v)) for v in values])
         return result
 
     def close(self) -> None:
