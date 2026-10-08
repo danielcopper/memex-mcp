@@ -100,6 +100,7 @@ def test_missing_or_broken_file(tmp_path: Path) -> None:
     [
         ("server", "port", [8000], "must be an integer"),
         ("server", "port", {"value": 8000}, "must be an integer"),
+        ("server", "port", float("inf"), "must be an integer"),
         ("index", "archive_factor", [0.5], "must be a number"),
         ("embeddings", "enabled", 1, "must be a boolean"),
         ("auth", "client_ids", ["claude-code", 7], "must be a list of strings"),
@@ -113,4 +114,30 @@ def test_values_of_the_wrong_type_are_refused(
     raw = raw_config(tmp_path)
     raw[section][key] = value
     with pytest.raises(ConfigError, match=rf"^\[{section}\] {key} {message}$"):
+        build_config(raw, {})
+
+
+@pytest.mark.parametrize("section", ["server", "auth", "rights", "repo", "index", "embeddings"])
+@pytest.mark.parametrize("value", [5, "auth", [1], [{"issuer": "x"}]], ids=repr)
+def test_a_section_that_is_not_a_table_is_refused(
+    tmp_path: Path, section: str, value: object
+) -> None:
+    raw: dict[str, object] = {**raw_config(tmp_path), section: value}
+    with pytest.raises(ConfigError, match=rf"^\[{section}\] must be a table$"):
+        build_config(raw, {})
+
+
+@pytest.mark.parametrize("value", [5, "alice", [1]], ids=repr)
+def test_users_that_are_not_a_table_are_refused(tmp_path: Path, value: object) -> None:
+    raw: dict[str, object] = {**raw_config(tmp_path), "users": value}
+    with pytest.raises(ConfigError, match=r"^\[users\] must map usernames to area directories$"):
+        build_config(raw, {})
+
+
+def test_an_unknown_log_level_is_refused(tmp_path: Path) -> None:
+    raw = raw_config(tmp_path)
+    raw["server"]["log_level"] = "debug"
+    assert build_config(raw, {}).server.log_level == "debug"
+    raw["server"]["log_level"] = "loud"
+    with pytest.raises(ConfigError, match=r"^\[server\] log_level must be a logging level"):
         build_config(raw, {})

@@ -8,6 +8,7 @@ secrets and URLs need not live in the file. The identity-to-area mapping
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from collections.abc import Mapping
@@ -144,7 +145,7 @@ def _coerce_number[N: (int, float)](kind: type[N], value: object, message: str) 
         raise ConfigError(message)
     try:
         return kind(value)
-    except ValueError:
+    except (ValueError, OverflowError):  # OverflowError: int() of an infinite float
         raise ConfigError(message) from None
 
 
@@ -177,8 +178,10 @@ def _coerce(section: str, key: str, value: object, default: object) -> object:
 def _section[S: DataclassInstance](
     name: str, defaults: S, raw: Mapping[str, object], env: Mapping[str, str]
 ) -> S:
-    # Typed as the table it is meant to be; any other value fails here as before.
-    table = cast("Mapping[str, object]", raw.get(name, {}))
+    value = raw.get(name, {})
+    if not isinstance(value, dict):
+        raise ConfigError(f"[{name}] must be a table")
+    table = cast("dict[str, object]", value)  # a TOML table's keys are strings
     known = {f.name for f in fields(defaults)}
     unknown = set(table) - known
     if unknown:
@@ -249,6 +252,9 @@ def _validate(config: Config) -> None:
         raise ConfigError(f"missing required settings: {', '.join(missing)}")
     if not config.server.mcp_path.startswith("/"):
         raise ConfigError("[server] mcp_path must start with '/'")
+    # The server hands the upper-cased name to logging.basicConfig.
+    if config.server.log_level.upper() not in logging.getLevelNamesMapping():
+        raise ConfigError("[server] log_level must be a logging level such as INFO or DEBUG")
     household = config.rights.household_area
     _check_area_name(household, "[rights] household_area")
     for username, area in config.users.items():
