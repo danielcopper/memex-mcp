@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memex-mcp"
+version = "0.1.0"
+description = "MCP server for a shared, per-person Markdown memory in git: search and read with rights from your identity provider"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+# An application, not a library: every package the code imports is pinned
+# exactly, so the image, CI and a local `mise run setup` run the same releases.
+dependencies = [
+    "anyio==4.15.1",
+    "fastmcp==4.0.11",
+    "httpx2==2.13.1",
+    "pydantic==2.13.5",
+    "pyjwt[crypto]==2.15.1",
+    "sqlite-vec==0.1.9",
+    "starlette==1.7.0",
+    "uvicorn==0.54.0",
+]
+
+[project.optional-dependencies]
+dev = ["basedpyright==1.40.2", "pytest==9.1.1", "ruff==0.16.10"]
+
+[project.scripts]
+memex-mcp = "memex_mcp.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["memex_mcp*"]
+
+[tool.setuptools.package-data]
+memex_mcp = ["py.typed"]
+
+[tool.pytest.ini_options]
+addopts = "-p no:cacheprovider"
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PTH", "ASYNC"]
+ignore = [
+    # subprocess runs git with a fixed argument list, never a shell string.
+    "S603",
+    "S607",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# assert is how pytest asserts; the fixtures' fake secrets are not secrets.
+"tests/**" = ["S101", "S105", "S106"]

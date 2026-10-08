@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Local working state: a config with real values, the index cache and a clone
+/config.toml
+*.sqlite3
+/data/
+
+.claude/
