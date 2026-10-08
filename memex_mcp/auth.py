@@ -50,14 +50,19 @@ def _key_entries(document: object) -> list[object]:
 
 def _malformed_member(data: dict[str, object]) -> str | None:
     """What is wrong with the members a signing key is looked up by, or None."""
-    # All three are strings (RFC 7517); PyJWT looks `alg` up, the key set is
-    # keyed by `kid`, and null counts as absent.
-    for name in ("kid", "alg", "use"):
+    # All three are strings (RFC 7517); PyJWT looks `alg` up and the key set
+    # is keyed by `kid`, so a null one counts as absent. `use` restricts what
+    # the key may do: a null one is no answer, and the key is skipped.
+    for name in ("kid", "alg"):
         value = data.get(name)
         if not isinstance(value, str | None):
             return f"{name} is {json_kind(value)}, not a string"
-    use = data.get("use")
-    if use not in {None, "sig", "enc"}:
+    if "use" not in data:
+        return None
+    use = data["use"]
+    if not isinstance(use, str):
+        return f"use is {json_kind(use)}, not a string"
+    if use not in {"sig", "enc"}:
         return f"use {use!r} is neither 'sig' nor 'enc'"
     return None
 
@@ -142,20 +147,23 @@ class AuthentikTokenVerifier(TokenVerifier):
         if not keys:
             # A set without one usable signing key never replaces the cache; the
             # token is rejected as when the endpoint does not answer.
-            hint = "is [auth] jwks_url the provider's JWKS endpoint?"
-            raise jwt.PyJWKSetError(
-                f"no usable signing key in the key set at {self.jwks_url}; {hint}"
-            )
+            raise jwt.PyJWKSetError("the key set has no usable signing key")
         self._keys = keys
 
     def _log_failed_fetch(self, exc: Exception) -> None:
         """The cached keys stay in use; the log says why the fetch failed and how many remain."""
+        # A PyJWKSetError means the URL answered, but not with a key set.
+        hint = "; is [auth] jwks_url the provider's JWKS endpoint?"
+        cached = len(self._keys)
         log.warning(
-            "cannot load the signing keys from %s: %s: %s; keeping %d cached key(s)",
+            "cannot load the signing keys from %s: %s: %s%s; %s",
             self.jwks_url,
             type(exc).__name__,
-            exc,
-            len(self._keys),
+            str(exc) or "no detail",
+            hint if isinstance(exc, jwt.PyJWKSetError) else "",
+            f"keeping {cached} cached key(s)"
+            if cached
+            else "no cached key: every token is rejected until a fetch succeeds",
         )
 
     async def _key_for(self, kid: str | None) -> jwt.PyJWK | None:

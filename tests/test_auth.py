@@ -324,6 +324,7 @@ MALFORMED_KEY_SETS: dict[str, tuple[object, str]] = {
         "entry 0: use is a list, not a string",
     ),
     "use unknown": ({"keys": [{**GOOD_JWK, "use": "foo"}]}, "entry 0: use 'foo' is neither"),
+    "use null": ({"keys": [{**GOOD_JWK, "use": None}]}, "entry 0: use is null, not a string"),
     "alg none": (
         {"keys": [{**GOOD_JWK, "alg": "none"}]},
         f"entry 0: {UNUSABLE} (kid 'k1', kty 'RSA', alg 'none'): NotImplementedError",
@@ -355,7 +356,11 @@ async def test_a_malformed_key_set_rejects_the_token_and_logs_why(
         assert await verifier_serving(document).verify_token(bearer) is None
     assert warned(caplog, problem)
     # However the set is broken, no usable key is left: the fetch counts as failed.
-    assert warned(caplog, f"cannot load the signing keys from {JWKS_URL}")
+    [failed] = [r.getMessage() for r in caplog.records if "cannot load" in r.getMessage()]
+    assert failed.startswith(f"cannot load the signing keys from {JWKS_URL}: PyJWKSetError: ")
+    assert failed.count(JWKS_URL) == 1
+    assert "is [auth] jwks_url the provider's JWKS endpoint?" in failed
+    assert failed.endswith("no cached key: every token is rejected until a fetch succeeds")
     assert "no signing key for kid 'k1'" in caplog.text
     assert bearer not in caplog.text
 
@@ -373,9 +378,15 @@ async def test_a_malformed_entry_does_not_hide_the_good_key(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("member", ["alg", "use"])
-async def test_a_null_alg_or_use_counts_as_absent(member: str) -> None:
-    assert await verifier_serving({"keys": [{**GOOD_JWK, member: None}]}).verify_token(token())
+async def test_a_null_alg_counts_as_absent() -> None:
+    assert await verifier_serving({"keys": [{**GOOD_JWK, "alg": None}]}).verify_token(token())
+
+
+@pytest.mark.anyio
+async def test_a_null_use_is_skipped() -> None:
+    assert (
+        await verifier_serving({"keys": [{**GOOD_JWK, "use": None}]}).verify_token(token()) is None
+    )
 
 
 @pytest.mark.anyio
@@ -404,13 +415,20 @@ def refuse() -> httpx2.Response:
     raise httpx2.ConnectError("connection refused")
 
 
+def refuse_silently() -> httpx2.Response:
+    raise httpx2.ReadTimeout("")
+
+
+HINT = "; is [auth] jwks_url the provider's JWKS endpoint?"
+
 BAD_REFETCHES: dict[str, tuple[Callable[[], httpx2.Response], str]] = {
-    "no keys member": (answer_json({}), "PyJWKSetError: the key set has no 'keys' member"),
-    "keys empty": (answer_json({"keys": []}), "no usable signing key"),
-    "encryption key only": (answer_json({"keys": [ENC_JWK]}), "no usable signing key"),
-    "keys a number": (answer_json({"keys": 5}), "keys is a number, not a list"),
-    "not JSON": (answer_html, "not JSON (content-type 'text/html')"),
-    "endpoint down": (refuse, "ConnectError: connection refused"),
+    "no keys member": (answer_json({}), f"PyJWKSetError: the key set has no 'keys' member{HINT}"),
+    "keys empty": (answer_json({"keys": []}), f"the key set has no usable signing key{HINT}"),
+    "encryption key only": (answer_json({"keys": [ENC_JWK]}), f"no usable signing key{HINT}"),
+    "keys a number": (answer_json({"keys": 5}), f"keys is a number, not a list{HINT}"),
+    "not JSON": (answer_html, f"not JSON (content-type 'text/html'){HINT}"),
+    "endpoint down": (refuse, "ConnectError: connection refused; keeping"),
+    "endpoint silent": (refuse_silently, "ReadTimeout: no detail; keeping"),
 }
 
 
