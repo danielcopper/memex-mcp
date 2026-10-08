@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/danielcopper/memex-mcp/compare/v0.1.0...v0.1.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* refuse malformed key sets, embedder answers and config values with a clear error ([#8](https://github.com/danielcopper/memex-mcp/issues/8)) ([4e6f70e](https://github.com/danielcopper/memex-mcp/commit/4e6f70e8e58303c5d29b94ef9269873695c6b197))
+
 ## 0.1.0 (2026-10-08)
 
 
