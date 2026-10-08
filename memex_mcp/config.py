@@ -53,7 +53,8 @@ class AuthConfig:
     # the username and the groups, `offline_access` a refresh token.
     scopes: tuple[str, ...] = ("openid", "profile", "offline_access")
     leeway_seconds: int = 30
-    # A refetch of the key set for an unknown key id happens at most this often.
+    # A refetch of the key set for an unknown key id happens at most this long
+    # after the last successful fetch.
     jwks_min_refetch_seconds: int = 60
     timeout_seconds: float = 5.0
 

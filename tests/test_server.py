@@ -13,12 +13,11 @@ import anyio
 import httpx2
 import pytest
 
-from memex_mcp.auth import AuthentikTokenVerifier
 from memex_mcp.rights import ACCESS_DENIED
 from memex_mcp.server import build_app
 from memex_mcp.service import Hit, Memex
 from tests.conftest import MARKER, Origin, make_config
-from tests.test_auth import CLIENT, ISSUER, JWKS_URL, KEY, FakeJwks, token
+from tests.test_auth import ISSUER, KEY, FakeJwks, make_verifier, token
 
 BASE = "https://memex.example.org"
 HEADERS = {"accept": "application/json, text/event-stream", "content-type": "application/json"}
@@ -55,21 +54,13 @@ async def serve(
     """The app with its lifespan, entered and left in the test's own task."""
     config = make_config(tmp_path, origin, repo={"fetch_interval_seconds": 0.05})
     memex = Memex.from_config(config, embedder=None)
-    verifier = AuthentikTokenVerifier(
-        issuer=ISSUER,
-        jwks_url=JWKS_URL,
-        client_ids=(CLIENT,),
-        algorithms=("RS256",),
-        leeway_seconds=30,
-        jwks_min_refetch_seconds=60,
-        timeout_seconds=1.0,
-        transport=httpx2.MockTransport(FakeJwks((KEY, "k1")).handler),
-    )
-    app = build_app(config, memex, verifier=verifier, run_loop=run_loop)
-    async with app.router.lifespan_context(app):
-        transport = httpx2.ASGITransport(app=app)
-        async with httpx2.AsyncClient(transport=transport, base_url=BASE) as http:
-            yield http
+    with FakeJwks((KEY, "k1")) as jwks:
+        verifier = make_verifier(jwks, algorithms=("RS256",))
+        app = build_app(config, memex, verifier=verifier, run_loop=run_loop)
+        async with app.router.lifespan_context(app):
+            transport = httpx2.ASGITransport(app=app)
+            async with httpx2.AsyncClient(transport=transport, base_url=BASE) as http:
+                yield http
 
 
 async def rpc(

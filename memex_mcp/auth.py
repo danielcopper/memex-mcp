@@ -6,7 +6,9 @@ with the provider's signing key, whose public half Authentik publishes at the
 application's JWKS endpoint. So the server validates each token itself —
 signature against the JWKS, ``iss``, ``exp``, ``aud`` and ``azp`` against the
 configured client ids — and reads the username (``preferred_username``) and
-groups (``groups``) from it; no introspection call per request.
+groups (``groups``) from it; no introspection call per request. A token must
+name its signing key (``kid``); the key set is cached for
+``JWKS_LIFESPAN_SECONDS``.
 
 A token without a well-formed ``preferred_username`` or ``groups`` claim is
 rejected: the provider is then missing the ``profile`` scope mapping, and
@@ -16,16 +18,12 @@ without groups no rights decision is possible.
 from __future__ import annotations
 
 import logging
-import time
-from collections.abc import Callable
 from typing import cast, override
 
 import anyio
-import httpx2
 import jwt
 from fastmcp.server.auth import AccessToken, TokenVerifier
 
-from memex_mcp.json_kind import json_kind
 from memex_mcp.rights import Identity
 
 log = logging.getLogger(__name__)
@@ -35,71 +33,41 @@ GROUPS_CLAIM = "groups"
 REQUIRED_CLAIMS = ["exp", "iat", "iss", "aud", "sub"]
 
 
-def _key_entries(document: object) -> list[object]:
-    """The ``keys`` of a JWKS document as they come; PyJWKSetError when it holds no list."""
-    if not isinstance(document, dict):
-        raise jwt.PyJWKSetError(f"the key set is {json_kind(document)}, not an object")
-    members = cast("dict[str, object]", document)  # a JSON object's keys are strings
-    if "keys" not in members:
-        raise jwt.PyJWKSetError("the key set has no 'keys' member")
-    entries = members["keys"]
-    if not isinstance(entries, list):
-        raise jwt.PyJWKSetError(f"keys is {json_kind(entries)}, not a list")
-    return cast("list[object]", entries)
+# The key set is cached this long, then fetched again: a key the provider has
+# revoked stops verifying at most this long after it left the key set.
+JWKS_LIFESPAN_SECONDS = 300
+
+# What a key lookup can raise besides PyJWT's own errors (measured at PyJWT
+# 2.15.1): OSError for a connection reset while the answer is read, ValueError
+# for an answer that is not JSON, RecursionError for one nested too deeply, and,
+# out of a key entry, TypeError for an `alg` that is not a string and
+# NotImplementedError for `alg` "none". Each of these fails the whole key set.
+_LOOKUP_ERRORS = (
+    jwt.PyJWTError,
+    OSError,
+    ValueError,
+    RecursionError,
+    TypeError,
+    NotImplementedError,
+)
+
+# How PyJWKClient.get_signing_key says that the key set has no key for the kid.
+_UNKNOWN_KID = "Unable to find a signing key that matches"
 
 
-def _malformed_member(data: dict[str, object]) -> str | None:
-    """What is wrong with the members a signing key is looked up by, or None."""
-    # All three are strings (RFC 7517); PyJWT looks `alg` up and the key set
-    # is keyed by `kid`, so a null one counts as absent. `use` restricts what
-    # the key may do: a null one is no answer, and the key is skipped.
-    for name in ("kid", "alg"):
-        value = data.get(name)
-        if not isinstance(value, str | None):
-            return f"{name} is {json_kind(value)}, not a string"
-    if "use" not in data:
-        return None
-    use = data["use"]
-    if not isinstance(use, str):
-        return f"use is {json_kind(use)}, not a string"
-    if use not in {"sig", "enc"}:
-        return f"use {use!r} is neither 'sig' nor 'enc'"
-    return None
-
-
-def _signing_key(index: int, entry: object) -> jwt.PyJWK | None:
-    """The signing key a JWKS entry describes, or None; a malformed entry is logged."""
-    if not isinstance(entry, dict):
-        log.warning("entry %d is %s, not an object; skipping it", index, json_kind(entry))
-        return None
-    data = cast("dict[str, object]", entry)  # a JSON object's keys are strings
-    problem = _malformed_member(data)
-    if problem is not None:
-        log.warning("entry %d: %s; skipping it", index, problem)
-        return None
-    # Authentik also lists the encryption key (use "enc") when one is set.
-    if data.get("use") == "enc":
-        return None
-    # PyJWT has no key form for alg "none" and says so with NotImplementedError.
-    try:
-        return jwt.PyJWK(data)
-    except (jwt.PyJWTError, NotImplementedError) as exc:
-        # Only the exception's type: PyJWT's messages may quote the whole key,
-        # private members included.
-        kty = data.get("kty")
-        log.warning(
-            "entry %d: unusable signing key (kid %r, kty %s, alg %r): %s",
-            index,
-            data.get("kid"),
-            repr(kty) if isinstance(kty, str | None) else json_kind(kty),
-            data.get("alg"),
-            type(exc).__name__,
-        )
-        return None
+def _answered_without_keys(exc: Exception) -> bool:
+    """Whether a failed lookup means the endpoint answered, but not with a usable key set."""
+    if isinstance(exc, jwt.PyJWKClientConnectionError | OSError):
+        return False
+    return not str(exc).startswith(_UNKNOWN_KID)
 
 
 class AuthentikTokenVerifier(TokenVerifier):
     """Validates Authentik-issued JWT access tokens with the provider's JWKS."""
+
+    # Not FastMCP's JWTVerifier: it accepts a single algorithm and does not
+    # check `azp`. PyJWKClient fetches, parses and caches the key set; the
+    # checks on the token are this class's own.
 
     def __init__(  # noqa: PLR0913 - keyword-only: every setting is named where it is passed
         self,
@@ -111,8 +79,6 @@ class AuthentikTokenVerifier(TokenVerifier):
         leeway_seconds: int,
         jwks_min_refetch_seconds: int,
         timeout_seconds: float,
-        transport: httpx2.AsyncBaseTransport | None = None,
-        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         super().__init__()
         self.issuer: str = issuer
@@ -120,69 +86,42 @@ class AuthentikTokenVerifier(TokenVerifier):
         self.client_ids: tuple[str, ...] = client_ids
         self.algorithms: tuple[str, ...] = algorithms
         self.leeway: int = leeway_seconds
-        self.min_refetch: int = jwks_min_refetch_seconds
-        self.timeout: float = timeout_seconds
-        self._transport: httpx2.AsyncBaseTransport | None = transport
-        self._clock: Callable[[], float] = clock
-        self._keys: dict[str | None, jwt.PyJWK] = {}
-        self._fetched_at: float | None = None
-        self._fetch_lock: anyio.Lock = anyio.Lock()
-
-    async def _fetch_keys(self) -> None:
-        async with httpx2.AsyncClient(transport=self._transport, timeout=self.timeout) as client:
-            response = await client.get(self.jwks_url)
-            response.raise_for_status()
-            try:
-                document = cast("object", response.json())
-            except ValueError:
-                content_type = response.headers.get("content-type")
-                raise jwt.PyJWKSetError(
-                    f"the answer is not JSON (content-type {content_type!r})"
-                ) from None
-        keys: dict[str | None, jwt.PyJWK] = {}
-        for index, entry in enumerate(_key_entries(document)):
-            key = _signing_key(index, entry)
-            if key is not None:
-                keys[key.key_id] = key
-        if not keys:
-            # A set without one usable signing key never replaces the cache; the
-            # token is rejected as when the endpoint does not answer.
-            raise jwt.PyJWKSetError("the key set has no usable signing key")
-        self._keys = keys
-
-    def _log_failed_fetch(self, exc: Exception) -> None:
-        """The cached keys stay in use; the log says why the fetch failed and how many remain."""
-        # A PyJWKSetError means the URL answered, but not with a key set.
-        hint = "; is [auth] jwks_url the provider's JWKS endpoint?"
-        cached = len(self._keys)
-        log.warning(
-            "cannot load the signing keys from %s: %s: %s%s; %s",
-            self.jwks_url,
-            type(exc).__name__,
-            str(exc) or "no detail",
-            hint if isinstance(exc, jwt.PyJWKSetError) else "",
-            f"keeping {cached} cached key(s)"
-            if cached
-            else "no cached key: every token is rejected until a fetch succeeds",
+        # A token with a kid the cached set lacks refetches the set, but not
+        # sooner than jwks_min_refetch_seconds after the last successful fetch.
+        self._jwks: jwt.PyJWKClient = jwt.PyJWKClient(
+            jwks_url,
+            cache_jwk_set=True,
+            lifespan=JWKS_LIFESPAN_SECONDS,
+            timeout=timeout_seconds,
+            cooldown_duration=jwks_min_refetch_seconds,
         )
+        # PyJWKClient blocks on its own lock while it fetches; one thread at a
+        # time keeps the waiting requests off the shared worker threads.
+        self._jwks_limiter: anyio.CapacityLimiter = anyio.CapacityLimiter(1)
 
-    async def _key_for(self, kid: str | None) -> jwt.PyJWK | None:
-        if kid in self._keys:
-            return self._keys[kid]
-        async with self._fetch_lock:
-            if kid not in self._keys:
-                now = self._clock()
-                if self._fetched_at is None or now - self._fetched_at >= self.min_refetch:
-                    self._fetched_at = now
-                    try:
-                        await self._fetch_keys()
-                    except (httpx2.HTTPError, ValueError, jwt.PyJWTError) as exc:
-                        self._log_failed_fetch(exc)
-        if kid in self._keys:
-            return self._keys[kid]
-        if kid is None and len(self._keys) == 1:
-            return next(iter(self._keys.values()))
-        return None
+    async def _signing_key(self, kid: str | None) -> jwt.PyJWK | None:
+        """The provider's signing key for ``kid``, or None with one log line saying why."""
+        if not kid:
+            # Authentik always names the signing key; PyJWKClient looks keys up by it.
+            log.info("bearer token rejected: no kid header")
+            return None
+        try:
+            return await anyio.to_thread.run_sync(
+                self._jwks.get_signing_key, kid, limiter=self._jwks_limiter
+            )
+        except _LOOKUP_ERRORS as exc:
+            # PyJWT puts the token's kid into its message unescaped; the escape
+            # keeps a line break in it from forging a log line.
+            detail = str(exc).encode("unicode_escape").decode("ascii") or "no detail"
+            hint = "; is [auth] jwks_url the provider's JWKS endpoint?"
+            log.warning(
+                "bearer token rejected: no signing key from %s: %s: %s%s",
+                self.jwks_url,
+                type(exc).__name__,
+                detail,
+                hint if _answered_without_keys(exc) else "",
+            )
+            return None
 
     @override
     async def verify_token(self, token: str) -> AccessToken | None:
@@ -197,9 +136,8 @@ class AuthentikTokenVerifier(TokenVerifier):
             log.info("bearer token rejected: algorithm %r not allowed", alg)
             return None
         # PyJWT has already refused a token whose `kid` header is not a string.
-        key = await self._key_for(cast("str | None", header.get("kid")))
+        key = await self._signing_key(cast("str | None", header.get("kid")))
         if key is None:
-            log.info("bearer token rejected: no signing key for kid %r", header.get("kid"))
             return None
         if key.algorithm_name != alg:
             # The token must name the algorithm its key is for; this is what

@@ -33,6 +33,10 @@ Authentik through the protected resource metadata (RFC 9728) at `/.well-known/oa
 tokens there; the server only validates them. Authentik issues access tokens as JWTs signed with the provider's signing
 key, so each token is checked locally against the provider's JWKS: signature, `iss`, `exp`, `aud` and `azp` (both must
 be one of the configured client ids). The caller's username comes from `preferred_username`, their groups from `groups`.
+A token must name its signing key (`kid`). The key set is cached for five minutes, so a key removed from the provider
+stops verifying within five minutes. A token naming a key the cached set lacks fetches the set again, but not sooner
+than `auth.jwks_min_refetch_seconds` (60 by default) after the last successful fetch. When the set cannot be fetched
+once the five minutes are over, every token is rejected until a fetch succeeds.
 
 **Rights.** Access requires membership in the group `memex`. A user reads the area their username maps to in the config
 and, as a member of the group `household`, the shared area too. Nothing else; there is no admin override. Every tool
@@ -178,5 +182,5 @@ mise run test       # pytest, no network
 ```
 
 The tests cover the rights matrix (each identity against each area through each tool), path attacks, token validation
-against a locally generated key and a mocked JWKS, search ranking with archive down-weighting and the keyword fallback,
-incremental re-indexing against a local bare repository, and the HTTP surface end to end.
+against a locally generated key and a JWKS endpoint on 127.0.0.1, search ranking with archive down-weighting and the
+keyword fallback, incremental re-indexing against a local bare repository, and the HTTP surface end to end.
