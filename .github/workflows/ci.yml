@@ -30,6 +30,8 @@ jobs:
           ruff format --check .
       - name: Type-check (basedpyright, zero warnings)
         run: basedpyright --warnings
+      - name: Cognitive complexity (at most 15 per function)
+        run: python scripts/cognitive_complexity.py
       - name: Tests
         run: python -m pytest tests -q
 

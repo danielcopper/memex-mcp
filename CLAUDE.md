@@ -11,6 +11,7 @@ Every change passes all of these, run in the checkout you changed:
 mise run setup      # editable install + pinned dev tools into .venv
 mise run lint       # ruff check + ruff format --check
 mise run typecheck  # basedpyright --warnings: zero errors and zero warnings
+mise run complexity # cognitive complexity of every function at most 15
 mise run test       # pytest, no network
 deno fmt --check    # markdown formatting (CI-enforced)
 ```
@@ -51,5 +52,7 @@ CI runs the same on Python 3.12 (the floor) and 3.14, and builds the container i
   warnings into errors; `with sqlite3.connect(...)` commits but does not close (use `contextlib.closing`).
 - **Never create a virtual table inside a note's savepoint.** Rolling back to a savepoint that created and wrote an FTS5
   table leaves SQLite unable to open the next savepoint; `rebuild` creates every configured area's table first.
+- **sqlite-vec ships no types**: `typings/sqlite_vec/__init__.pyi` copies its signatures. A bump of its pin checks the
+  stub against the new `__init__.py`.
 - `Index` ids are `AUTOINCREMENT` so a vector computed for a chunk that was replaced meanwhile can never attach to a new
   chunk.
