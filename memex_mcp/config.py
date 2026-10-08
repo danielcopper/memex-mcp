@@ -121,8 +121,8 @@ class Config:
         return self.auth.jwks_url or self.auth.issuer.rstrip("/") + "/jwks/"
 
 
-# Every field of Config but `users` is a section of scalar and list settings.
-_SECTIONS = frozenset(f.name for f in fields(Config)) - {"users"}
+# The top-level tables a config file may have: one per field of Config.
+_SECTIONS = frozenset(f.name for f in fields(Config))
 
 
 def _coerce_bool(where: str, value: object) -> bool:
@@ -204,7 +204,7 @@ def _check_area_name(name: str, where: str) -> None:
 
 def build_config(raw: Mapping[str, object], env: Mapping[str, str]) -> Config:
     """Build and validate a Config from parsed TOML and an environment."""
-    unknown = set(raw) - _SECTIONS - {"users"}
+    unknown = set(raw) - _SECTIONS
     if unknown:
         raise ConfigError(f"unknown sections: {', '.join(sorted(unknown))}")
     server = _section("server", ServerConfig(), raw, env)
