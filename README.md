@@ -163,6 +163,10 @@ docker run -d --name memex-mcp --read-only --tmpfs /tmp \
 In the config, set `repo.path = "/data/clone"` and `index.path = "/data/index/memex.sqlite3"`. The healthcheck calls
 `/healthz` on port 8000.
 
+Image tags: `latest` and `sha-<short>` follow `main`; each release adds `<version>` and `<major>.<minor>` (`0.1.0`,
+`0.1`). release-please cuts the releases from the Conventional Commits merged to `main`: it bumps the version in
+`pyproject.toml` and writes `CHANGELOG.md`.
+
 ## Development
 
 ```bash

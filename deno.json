@@ -4,6 +4,9 @@
       "**/*.md"
     ],
     "proseWrap": "always",
-    "lineWidth": 120
+    "lineWidth": 120,
+    "exclude": [
+      "CHANGELOG.md"
+    ]
   }
 }
