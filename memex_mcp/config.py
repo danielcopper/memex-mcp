@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 ENV_PREFIX = "MEMEX_"
 CONFIG_ENV = "MEMEX_CONFIG"
+MIN_SNIPPET_CHARS = 40
 
 
 class ConfigError(ValueError):
@@ -256,8 +257,8 @@ def _validate(config: Config) -> None:
             raise ConfigError(f"[users] {username}: {area!r} is the household area")
     if not 0 < config.index.archive_factor <= 1:
         raise ConfigError("[index] archive_factor must be in (0, 1]")
-    if config.index.snippet_chars < 40:
-        raise ConfigError("[index] snippet_chars must be at least 40")
+    if config.index.snippet_chars < MIN_SNIPPET_CHARS:
+        raise ConfigError(f"[index] snippet_chars must be at least {MIN_SNIPPET_CHARS}")
 
 
 def load_config(path: str | Path | None = None, env: Mapping[str, str] | None = None) -> Config:

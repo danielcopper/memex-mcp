@@ -9,14 +9,14 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, NotRequired, TypedDict
 
 from memex_mcp.config import Config
 from memex_mcp.embed import Embedder, EmbeddingError
-from memex_mcp.index import Index, is_archived, query_words
+from memex_mcp.index import ChunkRow, Index, is_archived, query_words
 from memex_mcp.markdown import title_of
 from memex_mcp.repo import GitError, GitRepo
 from memex_mcp.rights import (
@@ -91,6 +91,27 @@ class ListResult(TypedDict):
     entries: list[Entry]
 
 
+def _checked_query(query: str) -> str:
+    """The stripped query; raises InvalidRequest when it is empty or too big."""
+    query = query.strip()
+    if not query:
+        raise InvalidRequest("the query must not be empty")
+    if len(query) > MAX_QUERY_CHARS:
+        raise InvalidRequest(f"the query is too long: at most {MAX_QUERY_CHARS} characters")
+    if len(query_words(query)) > MAX_QUERY_WORDS:
+        raise InvalidRequest(f"the query has too many words: at most {MAX_QUERY_WORDS} words")
+    return query
+
+
+def _fuse(rankings: Iterable[list[int]]) -> dict[int, float]:
+    """Reciprocal rank fusion: only ranks count, never scores from different tables."""
+    fused: dict[int, float] = defaultdict(float)
+    for ranking in rankings:
+        for rank, chunk_id in enumerate(ranking):
+            fused[chunk_id] += 1.0 / (RRF_K + rank + 1)
+    return fused
+
+
 def make_snippet(text: str, words: list[str], size: int) -> str:
     """At most ``size`` characters of ``text`` around the first match of any word."""
     flat = " ".join(text.split())
@@ -155,36 +176,17 @@ class Memex:
         areas = self.policy.areas_for(identity)
         if area is not None:
             areas = frozenset({check_area(area, areas)})
-        query = query.strip()
-        if not query:
-            raise InvalidRequest("the query must not be empty")
-        if len(query) > MAX_QUERY_CHARS:
-            raise InvalidRequest(f"the query is too long: at most {MAX_QUERY_CHARS} characters")
-        if len(query_words(query)) > MAX_QUERY_WORDS:
-            raise InvalidRequest(f"the query has too many words: at most {MAX_QUERY_WORDS} words")
+        query = _checked_query(query)
         limit = max(1, min(limit, self.config.index.max_limit))
         pool = max(limit * 5, 50)
 
         keyword_rankings = self.index.keyword_ranked(query, areas, pool)
         vector_ids, notice = self._semantic(query, areas, pool)
 
-        # Reciprocal rank fusion over one keyword ranking per area plus the
-        # vector ranking: only ranks count, never scores from different tables.
-        fused: dict[int, float] = defaultdict(float)
-        for ranking in (*keyword_rankings, vector_ids):
-            for rank, chunk_id in enumerate(ranking):
-                fused[chunk_id] += 1.0 / (RRF_K + rank + 1)
+        # One keyword ranking per area plus the vector ranking.
+        fused = _fuse((*keyword_rankings, vector_ids))
         rows = self.index.chunks(fused)
-
-        best: dict[str, tuple[float, int]] = {}
-        for chunk_id, score in fused.items():
-            row = rows.get(chunk_id)
-            if row is None or row.area not in areas:
-                continue
-            if row.archived:
-                score *= self.config.index.archive_factor
-            if row.path not in best or score > best[row.path][0]:
-                best[row.path] = (score, chunk_id)
+        best = self._best_per_note(fused, rows, areas)
 
         ordered = sorted(best.items(), key=lambda item: (-item[1][0], item[0]))[:limit]
         words = query_words(query)
@@ -206,6 +208,22 @@ class Memex:
         if notice is not None:
             result["notice"] = notice
         return result
+
+    def _best_per_note(
+        self, fused: dict[int, float], rows: dict[int, ChunkRow], areas: frozenset[str]
+    ) -> dict[str, tuple[float, int]]:
+        """Each note's best chunk as (score, chunk id); rows outside ``areas`` are dropped."""
+        best: dict[str, tuple[float, int]] = {}
+        for chunk_id, fused_score in fused.items():
+            row = rows.get(chunk_id)
+            if row is None or row.area not in areas:
+                continue
+            score = fused_score
+            if row.archived:
+                score *= self.config.index.archive_factor
+            if row.path not in best or score > best[row.path][0]:
+                best[row.path] = (score, chunk_id)
+        return best
 
     def _semantic(
         self, query: str, areas: frozenset[str], pool: int

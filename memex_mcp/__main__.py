@@ -22,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(cast("str | None", args.config))
     except ConfigError as exc:
-        print(f"memex-mcp: {exc}", file=sys.stderr)
+        sys.stderr.write(f"memex-mcp: {exc}\n")
         return 2
     logging.basicConfig(
         level=config.server.log_level.upper(),

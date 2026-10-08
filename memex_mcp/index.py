@@ -41,6 +41,8 @@ log = logging.getLogger(__name__)
 SCHEMA_VERSION = 3
 
 ARCHIVE_SEGMENT = "archive"
+# A note's path has at least two segments: its area, then its file name.
+_MIN_NOTE_SEGMENTS = 2
 
 _SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -96,7 +98,11 @@ def is_indexable(root: Path, relative: str, areas: frozenset[str]) -> bool:
         log.warning("skipping a file name that is not valid UTF-8: %r", relative)
         return False
     parts = PurePosixPath(relative).parts
-    if len(parts) < 2 or parts[0] not in areas or not parts[-1].endswith(NOTE_SUFFIX):
+    if (
+        len(parts) < _MIN_NOTE_SEGMENTS
+        or parts[0] not in areas
+        or not parts[-1].endswith(NOTE_SUFFIX)
+    ):
         return False
     if any(part.startswith(".") or part == ".." for part in parts):
         return False
@@ -309,7 +315,7 @@ class Index:
         self.conn.execute("SAVEPOINT note")
         try:
             self._insert_note(root, relative)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - one failing note never stops a batch; it is logged
             self.conn.execute("ROLLBACK TO note")
             self.conn.execute("RELEASE note")
             log.warning("skipping %s: %s", relative, exc)

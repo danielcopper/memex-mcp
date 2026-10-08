@@ -46,7 +46,7 @@ def _key_entries(document: object) -> Iterable[object]:
 class AuthentikTokenVerifier(TokenVerifier):
     """Validates Authentik-issued JWT access tokens with the provider's JWKS."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - keyword-only: every setting is named where it is passed
         self,
         *,
         issuer: str,

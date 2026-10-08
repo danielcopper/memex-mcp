@@ -64,22 +64,31 @@ def _sections(text: str) -> list[tuple[str, str]]:
     return sections
 
 
+def _cut_long(paragraph: str, max_chars: int) -> tuple[list[str], str]:
+    """Cut full pieces off ``paragraph``, at a space where one is near, until the rest fits."""
+    pieces: list[str] = []
+    while len(paragraph) > max_chars:
+        cut = paragraph.rfind(" ", 0, max_chars)
+        cut = cut if cut > max_chars // 2 else max_chars
+        pieces.append(paragraph[:cut].rstrip())
+        paragraph = paragraph[cut:].lstrip()
+    return pieces, paragraph
+
+
 def _pieces(body: str, max_chars: int) -> list[str]:
     """Greedily pack paragraphs into pieces of at most ``max_chars``."""
     pieces: list[str] = []
     current = ""
-    for paragraph in re.split(r"\n\s*\n", body):
-        paragraph = paragraph.strip()
+    for block in re.split(r"\n\s*\n", body):
+        paragraph = block.strip()
         if not paragraph:
             continue
-        while len(paragraph) > max_chars:
+        if len(paragraph) > max_chars:
             if current:
                 pieces.append(current)
                 current = ""
-            cut = paragraph.rfind(" ", 0, max_chars)
-            cut = cut if cut > max_chars // 2 else max_chars
-            pieces.append(paragraph[:cut].rstrip())
-            paragraph = paragraph[cut:].lstrip()
+            cut_off, paragraph = _cut_long(paragraph, max_chars)
+            pieces.extend(cut_off)
         if current and len(current) + 2 + len(paragraph) > max_chars:
             pieces.append(current)
             current = ""
