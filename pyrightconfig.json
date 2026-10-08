@@ -1,6 +1,6 @@
 {
   "pythonVersion": "3.12",
-  // Every basedpyright rule is on; `mise run typecheck` fails on a warning too.
+  // All rules on but the one below; `mise run typecheck` fails on a warning too.
   "typeCheckingMode": "recommended",
   "include": ["memex_mcp", "scripts", "tests"],
   "exclude": [".venv", "build", ".claude"],

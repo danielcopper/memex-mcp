@@ -138,7 +138,8 @@ def _coerce_bool(where: str, value: object) -> bool:
 
 def _coerce_number[N: (int, float)](kind: type[N], value: object, message: str) -> N:
     # TOML and the environment give strings, numbers, booleans, lists, tables
-    # and dates; only the first three convert, the rest fail like a bad string.
+    # and dates; only the first three can convert, the rest fail like a string
+    # that does not.
     if not isinstance(value, str | int | float):
         raise ConfigError(message)
     try:
