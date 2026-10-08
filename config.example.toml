@@ -1,0 +1,60 @@
+# memex-mcp configuration. Every scalar or list setting can be overridden by an
+# environment variable MEMEX_<SECTION>_<KEY>, e.g. MEMEX_REPO_REMOTE or
+# MEMEX_AUTH_CLIENT_IDS (comma-separated). All values below are examples.
+
+[server]
+host = "0.0.0.0"
+port = 8000
+# The URL clients use; the resource advertised to them is public_url + mcp_path.
+public_url = "https://memex.example.org"
+mcp_path = "/mcp"
+log_level = "INFO"
+
+[auth]
+# Authentik's issuer for the memex application (Issuer mode: per provider).
+issuer = "https://auth.example.org/application/o/memex/"
+# Defaults to "<issuer>jwks/".
+# jwks_url = "https://auth.example.org/application/o/memex/jwks/"
+# Client ids whose access tokens are accepted (checked against aud and azp).
+client_ids = ["memex-claude-code"]
+algorithms = ["RS256", "ES256"]
+scopes = ["openid", "profile", "offline_access"]
+leeway_seconds = 30
+jwks_min_refetch_seconds = 60
+timeout_seconds = 5.0
+
+[rights]
+access_group = "memex"
+household_group = "household"
+household_area = "household"
+
+[repo]
+path = "/data/clone"
+# Cloned from here if path holds no clone yet. A URL with a credential belongs
+# in MEMEX_REPO_REMOTE, not in this file.
+remote = "https://git.example.org/alice/memex.git"
+branch = "main"
+fetch_interval_seconds = 60
+git_timeout_seconds = 60
+
+[index]
+path = "/data/index/memex.sqlite3"
+archive_factor = 0.5
+snippet_chars = 300
+chunk_chars = 1500
+max_limit = 50
+
+[embeddings]
+enabled = true
+url = "http://ollama.example.org:11434"
+model = "bge-m3"
+dimensions = 1024
+query_timeout_seconds = 3.0
+index_timeout_seconds = 120.0
+retry_after_seconds = 60.0
+batch_size = 32
+
+# Authentik username (preferred_username) -> the user's own area directory.
+[users]
+alice = "alice"
+bob = "bob"

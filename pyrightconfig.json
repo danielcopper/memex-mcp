@@ -1,0 +1,14 @@
+{
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "standard",
+  "include": ["memex_mcp", "tests"],
+  "exclude": [".venv", "build", ".claude"],
+  "reportMissingModuleSource": "none",
+  "reportMissingImports": "error",
+  "reportPrivateUsage": "error",
+  "reportUnusedImport": "error",
+  "reportUnusedVariable": "error",
+  "reportUnnecessaryComparison": "error",
+  "reportUnnecessaryIsInstance": "error",
+  "reportMissingTypeArgument": "error"
+}
