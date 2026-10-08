@@ -2,7 +2,7 @@
   "pythonVersion": "3.12",
   // Every basedpyright rule is on; `mise run typecheck` fails on a warning too.
   "typeCheckingMode": "recommended",
-  "include": ["memex_mcp", "tests"],
+  "include": ["memex_mcp", "scripts", "tests"],
   "exclude": [".venv", "build", ".claude"],
   "reportMissingModuleSource": "none",
   // Off: the results dropped here are dropped by design (cursors of SQL writes, git run for its
