@@ -125,7 +125,7 @@ class AuthentikTokenVerifier(TokenVerifier):
         if not isinstance(alg, str) or alg not in self.algorithms:
             log.info("bearer token rejected: algorithm %r not allowed", alg)
             return None
-        # Typed as the key ids it is compared with; the value is passed on as it came.
+        # PyJWT has already refused a token whose `kid` header is not a string.
         key = await self._key_for(cast("str | None", header.get("kid")))
         if key is None:
             log.info("bearer token rejected: no signing key for kid %r", header.get("kid"))
