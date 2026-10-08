@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import time
 from base64 import urlsafe_b64encode
 from typing import TypedDict
@@ -279,3 +280,58 @@ async def test_encryption_keys_and_keys_without_alg_are_handled() -> None:
     )
     assert await verifier.verify_token(token()) is not None
     assert await verifier.verify_token(token(key=enc_key, kid="e1")) is None
+
+
+def verifier_serving(document: object) -> AuthentikTokenVerifier:
+    """A verifier whose JWKS endpoint answers with ``document``."""
+    return AuthentikTokenVerifier(
+        issuer=ISSUER,
+        jwks_url=JWKS_URL,
+        client_ids=(CLIENT,),
+        algorithms=("RS256", "ES256"),
+        leeway_seconds=30,
+        jwks_min_refetch_seconds=60,
+        timeout_seconds=1.0,
+        transport=httpx2.MockTransport(lambda _request: httpx2.Response(200, json=document)),
+    )
+
+
+def without(jwk: dict[str, object], name: str) -> dict[str, object]:
+    return {k: v for k, v in jwk.items() if k != name}
+
+
+GOOD_JWK = jwk_of(KEY, "k1")
+
+MALFORMED_KEY_SETS: dict[str, tuple[object, str]] = {
+    "not an object": ([GOOD_JWK], "the key set is not a JSON object"),
+    "keys a number": ({"keys": 5}, "the key set's keys are not a list"),
+    "keys null": ({"keys": None}, "the key set's keys are not a list"),
+    "keys an object": ({"keys": GOOD_JWK}, "the key set's keys are not a list"),
+    "entries not objects": ({"keys": [5, None, "k1"]}, "an entry that is not a JSON object"),
+    "kid a list": ({"keys": [{**GOOD_JWK, "kid": ["k1"]}]}, "kid or alg is not a string"),
+    "alg a list": ({"keys": [{**GOOD_JWK, "alg": ["RS256"]}]}, "kid or alg is not a string"),
+    "alg none": ({"keys": [{**GOOD_JWK, "alg": "none"}]}, "an unusable signing key"),
+    "no kty": ({"keys": [without(GOOD_JWK, "kty")]}, "an unusable signing key"),
+    "no modulus": ({"keys": [without(GOOD_JWK, "n")]}, "an unusable signing key"),
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("document", "problem"), MALFORMED_KEY_SETS.values(), ids=list(MALFORMED_KEY_SETS)
+)
+async def test_a_malformed_key_set_rejects_the_token_and_logs_why(
+    document: object, problem: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    bearer = token()
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        assert await verifier_serving(document).verify_token(bearer) is None
+    assert problem in caplog.text
+    assert "no signing key for kid 'k1'" in caplog.text
+    assert bearer not in caplog.text
+
+
+@pytest.mark.anyio
+async def test_a_malformed_entry_does_not_hide_the_good_key() -> None:
+    document = {"keys": [5, {**GOOD_JWK, "kid": ["k1"]}, {**GOOD_JWK, "alg": "none"}, GOOD_JWK]}
+    assert await verifier_serving(document).verify_token(token()) is not None

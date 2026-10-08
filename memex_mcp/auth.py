@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import cast, override
 
 import anyio
@@ -34,13 +34,37 @@ GROUPS_CLAIM = "groups"
 REQUIRED_CLAIMS = ["exp", "iat", "iss", "aud", "sub"]
 
 
-def _key_entries(document: object) -> Iterable[object]:
-    """The ``keys`` of a JWKS document as they come; none when the document is no object."""
+def _key_entries(document: object) -> list[object]:
+    """The ``keys`` of a JWKS document as they come; PyJWKSetError when it holds no list."""
     if not isinstance(document, dict):
-        return []
-    # A JSON object's keys are strings. A ``keys`` value that is not iterable
-    # raises TypeError when iterated, as it did before this was typed.
-    return cast("Iterable[object]", cast("dict[str, object]", document).get("keys", []))
+        raise jwt.PyJWKSetError("the key set is not a JSON object")
+    # A JSON object's keys are strings.
+    entries = cast("dict[str, object]", document).get("keys", [])
+    if not isinstance(entries, list):
+        raise jwt.PyJWKSetError("the key set's keys are not a list")
+    return cast("list[object]", entries)
+
+
+def _signing_key(entry: object) -> jwt.PyJWK | None:
+    """The signing key a JWKS entry describes, or None; a malformed entry is logged."""
+    if not isinstance(entry, dict):
+        log.warning("skipping an entry that is not a JSON object in the key set")
+        return None
+    data = cast("dict[str, object]", entry)  # a JSON object's keys are strings
+    # Authentik also lists the encryption key (use "enc") when one is set.
+    if data.get("use", "sig") != "sig":
+        return None
+    kid = data.get("kid")
+    # Both are strings (RFC 7517); PyJWT looks `alg` up and the key set is keyed by `kid`.
+    if not isinstance(kid, str | None) or not isinstance(data.get("alg", ""), str):
+        log.warning("skipping a signing key whose kid or alg is not a string")
+        return None
+    # PyJWT has no key form for alg "none" and says so with NotImplementedError.
+    try:
+        return jwt.PyJWK(data)
+    except (jwt.PyJWTError, NotImplementedError) as exc:
+        log.warning("skipping an unusable signing key %r: %s", kid, exc)
+        return None
 
 
 class AuthentikTokenVerifier(TokenVerifier):
@@ -80,18 +104,9 @@ class AuthentikTokenVerifier(TokenVerifier):
             document = cast("object", response.json())
         keys: dict[str | None, jwt.PyJWK] = {}
         for entry in _key_entries(document):
-            if not isinstance(entry, dict):
-                continue
-            data = cast("dict[str, object]", entry)  # a JSON object's keys are strings
-            # Authentik also lists the encryption key (use "enc") when one is set.
-            if data.get("use", "sig") != "sig":
-                continue
-            try:
-                key = jwt.PyJWK(data)
-            except jwt.PyJWTError as exc:
-                log.warning("skipping an unusable signing key %r: %s", data.get("kid"), exc)
-                continue
-            keys[key.key_id] = key
+            key = _signing_key(entry)
+            if key is not None:
+                keys[key.key_id] = key
         self._keys = keys
 
     async def _key_for(self, kid: str | None) -> jwt.PyJWK | None:
