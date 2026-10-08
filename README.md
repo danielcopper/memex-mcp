@@ -35,9 +35,10 @@ key, so each token is checked locally against the provider's JWKS: signature, `i
 be one of the configured client ids). The caller's username comes from `preferred_username`, their groups from `groups`.
 A token must name its signing key (`kid`). The key set is cached for five minutes, so a key removed from the provider
 stops verifying within five minutes. A token naming a key the cached set lacks fetches the set again, but not sooner
-than `auth.jwks_min_refetch_seconds` (60 by default) after the last successful fetch, and a failed fetch is not tried
-again for that long either. When the set cannot be fetched once the five minutes are over, every token is rejected until
-a fetch succeeds.
+than `auth.jwks_min_refetch_seconds` (60 by default) after the last successful fetch. After a failed fetch the next one
+waits as long, counted from the failure and at least `auth.timeout_seconds`. When the set cannot be fetched once the
+five minutes are over, every token is rejected until a fetch succeeds; a token whose key is cached never waits for a
+fetch.
 
 **Rights.** Access requires membership in the group `memex`. A user reads the area their username maps to in the config
 and, as a member of the group `household`, the shared area too. Nothing else; there is no admin override. Every tool

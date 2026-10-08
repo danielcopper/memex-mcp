@@ -17,6 +17,8 @@ without groups no rights decision is possible.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from typing import cast, override
@@ -57,8 +59,19 @@ _FETCH_ERRORS = (
 
 _HINT = "; is [auth] jwks_url the provider's JWKS endpoint?"
 
+# What PyJWT raises out of a single entry when that entry makes it refuse the
+# whole set (see _FETCH_ERRORS); no other fetch was seen to raise these.
+_ENTRY_ERRORS = (TypeError, NotImplementedError, KeyError)
+_ENTRY_REFUSED = (
+    '; an entry makes PyJWT refuse the whole set (alg "none", an alg that is not a string,'
+    " or an oct key without k)"
+)
+
 # Log lines carry at most this much of a kid.
 _KID_CHARS = 64
+
+# A fetched set logs at most this many lines about entries it will not use.
+_ENTRY_LINES = 10
 
 
 def _clip(text: str) -> str:
@@ -68,6 +81,11 @@ def _clip(text: str) -> str:
 def _member(value: object) -> str:
     """A key set member for a log line: a clipped string, or the kind of anything else."""
     return repr(_clip(value)) if isinstance(value, str) else json_kind(value)
+
+
+def _is_signing_key(key: jwt.PyJWK) -> bool:
+    """What PyJWKClient keeps as a signing key: `use` "sig" or absent, and a kid."""
+    return key.public_key_use in ("sig", None) and bool(key.key_id)
 
 
 def _unused(entry: object) -> tuple[int, str] | None:
@@ -85,12 +103,41 @@ def _unused(entry: object) -> tuple[int, str] | None:
     except jwt.PyJWTError as exc:
         # Only the type: PyJWT's messages may quote the whole key.
         return logging.WARNING, f"({about}) is unusable: {type(exc).__name__}"
-    # What PyJWKClient keeps as signing keys: `use` "sig" or absent, and a kid.
-    if use not in ("sig", None):
-        return logging.WARNING, f"({about}) has use {_member(use)}, not 'sig'"
+    if _is_signing_key(key):
+        return None
     if not key.key_id:
         return logging.WARNING, f"({about}) has no kid"
-    return None
+    return logging.WARNING, f"({about}) has use {_member(use)}, not 'sig'"
+
+
+def _review(entries: list[object]) -> tuple[tuple[object, ...], list[tuple[int, str]]]:
+    """The kids of the signing keys in a fetched set, and a log line for every other entry."""
+    kids: list[object] = []
+    notes: list[tuple[int, str]] = []
+    for index, entry in enumerate(entries):
+        unused = _unused(entry)
+        if unused is not None:
+            level, why = unused
+            notes.append((level, f"key set entry {index} {why}; not used"))
+            continue
+        kid = cast("dict[str, object]", entry)["kid"]
+        if not isinstance(kid, str):
+            why = f"has kid {_member(kid)}, not a string; no token can name it"
+            notes.append((logging.WARNING, f"key set entry {index} {why}"))
+        elif kid in kids:
+            why = f"repeats kid {_member(kid)}; PyJWT uses the first"
+            notes.append((logging.WARNING, f"key set entry {index} {why}"))
+        kids.append(kid)
+    return tuple(kids), notes
+
+
+def _log_notes(notes: list[tuple[int, str]]) -> None:
+    for level, note in notes[:_ENTRY_LINES]:
+        log.log(level, "%s", note)
+    rest = notes[_ENTRY_LINES:]
+    if rest:
+        level = max(level for level, _note in rest)
+        log.log(level, "and %d more key set entries not used", len(rest))
 
 
 class _KeySetUnavailable(jwt.PyJWKClientError):
@@ -98,10 +145,11 @@ class _KeySetUnavailable(jwt.PyJWKClientError):
 
 
 class _ProviderJwks(jwt.PyJWKClient):
-    """PyJWKClient that waits a cooldown after a failed fetch and logs what it will not use.
+    """PyJWKClient that waits after a failed fetch and logs what it will not use.
 
     PyJWT still fetches, parses and caches the set; this class only adds to
-    ``fetch_data``, which PyJWT calls under the client's lock.
+    ``fetch_data``, which PyJWT calls under the client's lock, and reads the
+    cache without the lock in ``cached_key``.
     """
 
     def __init__(self, uri: str, *, timeout: float, cooldown: float) -> None:
@@ -114,10 +162,30 @@ class _ProviderJwks(jwt.PyJWKClient):
             timeout=timeout,
             cooldown_duration=cooldown,
         )
+        # After a failed fetch, the next waits the cooldown, but at least the
+        # timeout: a cooldown of 0 must not turn an outage into a fetch per request.
+        self._wait: float = max(cooldown, timeout)
         # No fetch before this time on the monotonic clock, after a failed one.
         self._retry_at: float = -float("inf")
         self._failures: int = 0
+        self._entries: str | None = None
         self._kids: tuple[object, ...] | None = None
+
+    @property
+    def has_no_signing_key(self) -> bool:
+        """Whether the last fetched set held no key PyJWKClient would sign with."""
+        return self._kids == ()
+
+    def cached_key(self, kid: str) -> jwt.PyJWK | None:
+        """The signing key for ``kid`` from a cached set that has not expired, or None.
+
+        Reads only the cache, which PyJWT replaces as a whole, so it needs neither
+        the lock nor a thread; ``get`` returns None once the set has expired.
+        """
+        jwk_set = self.jwk_set_cache.get() if self.jwk_set_cache else None
+        if jwk_set is None:
+            return None
+        return self.match_kid([key for key in jwk_set.keys if _is_signing_key(key)], kid)
 
     @override
     def fetch_data(self) -> dict[str, object]:
@@ -128,7 +196,7 @@ class _ProviderJwks(jwt.PyJWKClient):
         except _FETCH_ERRORS as exc:
             # Counted from the failure: a fetch that timed out took that long.
             failed_at = time.monotonic()
-            self._retry_at = failed_at + self.cooldown_duration
+            self._retry_at = failed_at + self._wait
             self._failures += 1
             self._log_failure(exc, failed_at)
             raise _KeySetUnavailable(type(exc).__name__) from exc
@@ -145,37 +213,40 @@ class _ProviderJwks(jwt.PyJWKClient):
         else:
             left = cached.get_timestamp() + cache.lifespan - now
             consequence = f"the cached key set stays in use for another {left:.0f} s"
+        if isinstance(exc, jwt.PyJWKClientConnectionError | OSError):
+            explanation = ""  # says nothing about what the endpoint is
+        elif isinstance(exc, _ENTRY_ERRORS):
+            explanation = _ENTRY_REFUSED
+        else:
+            explanation = _HINT
         log.warning(
             "cannot load the key set from %s: %s: %s%s; %s; no new fetch for %g s",
             self.uri,
             type(exc).__name__,
             str(exc) or "no detail",
-            # A connection error says nothing about what the endpoint is.
-            "" if isinstance(exc, jwt.PyJWKClientConnectionError | OSError) else _HINT,
+            explanation,
             consequence,
-            self.cooldown_duration,
+            self._wait,
         )
 
     def _signing_kids(self, entries: list[object]) -> tuple[object, ...]:
-        """The kids of the signing keys in a fetched set; every other entry is logged."""
-        kids: list[object] = []
-        for index, entry in enumerate(entries):
-            unused = _unused(entry)
-            if unused is None:
-                kids.append(cast("dict[str, object]", entry)["kid"])
-                continue
-            level, why = unused
-            log.log(level, "key set entry %d %s; not used", index, why)
-        return tuple(kids)
+        """The kids of the signing keys in a fetched set; other entries are logged on a change."""
+        digest = hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest()
+        if digest == self._entries and self._kids is not None:
+            return self._kids
+        self._entries = digest
+        kids, notes = _review(entries)
+        _log_notes(notes)
+        return kids
 
     def _log_success(self, kids: tuple[object, ...]) -> None:
         listed = ", ".join(_member(kid) for kid in kids)
         if not kids:
             log.warning(
-                "the key set from %s has no signing key: every token is rejected for %d s%s",
+                "the key set from %s has no signing key: every token is rejected for %d s; %s",
                 self.uri,
                 JWKS_LIFESPAN_SECONDS,
-                _HINT,
+                "check the provider's signing key",
             )
         elif self._failures:
             log.info(
@@ -226,17 +297,23 @@ class AuthentikTokenVerifier(TokenVerifier):
             # Authentik always names the signing key; PyJWKClient looks keys up by it.
             log.info("bearer token rejected: no kid header")
             return None
+        # A cached key is served in the event loop, so it never waits for a fetch.
+        key = self._jwks.cached_key(kid)
+        if key is not None:
+            return key
         try:
             return await anyio.to_thread.run_sync(
                 self._jwks.get_signing_key, kid, limiter=self._jwks_limiter
             )
         except jwt.PyJWKClientError as exc:
             # A problem with the endpoint or the set has been logged by the fetch.
-            log.info(
-                "bearer token rejected: no signing key for kid %r%s",
-                _clip(kid),
-                ": the key set could not be fetched" if isinstance(exc, _KeySetUnavailable) else "",
-            )
+            if isinstance(exc, _KeySetUnavailable):
+                reason = ": the key set could not be fetched"
+            elif self._jwks.has_no_signing_key:
+                reason = ": the key set has no signing key"
+            else:
+                reason = ""
+            log.info("bearer token rejected: no signing key for kid %r%s", _clip(kid), reason)
             return None
 
     @override
