@@ -87,8 +87,8 @@ def reset_mid_answer(handler: BaseHTTPRequestHandler) -> None:
     connection.close()
 
 
+# PyJWT's wording; what follows it is Python's own, which changes between versions.
 CONNECTION_ERROR = "PyJWKClientConnectionError: Fail to fetch data from the url, err: "
-HUNG_UP = CONNECTION_ERROR + '"Remote end closed connection without response"'
 
 
 class FakeJwks:
@@ -412,10 +412,10 @@ async def test_an_expired_key_set_is_not_used_while_the_endpoint_is_down(
     clock.now += JWKS_LIFESPAN_SECONDS + 1
     with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
         assert await verifier.verify_token(token()) is None
-    assert caplog.messages == [
-        f"cannot load the key set from {jwks.url}: {HUNG_UP}; {ALL_REJECTED}; {NO_FETCH_FOR}",
-        REJECTED_UNFETCHED,
-    ]
+    [warning, rejected] = caplog.messages
+    assert warning.startswith(f"cannot load the key set from {jwks.url}: {CONNECTION_ERROR}")
+    assert warning.endswith(f"; {ALL_REJECTED}; {NO_FETCH_FOR}")
+    assert rejected == REJECTED_UNFETCHED
 
 
 @pytest.mark.anyio
@@ -828,13 +828,20 @@ REFUSED = (
 )
 NO_USABLE_KEYS = "PyJWKSetError: The JWK Set did not contain any usable keys."
 
-# What the endpoint answers -> the cause the warning names, and what it adds:
-# the jwks_url hint when the endpoint answered, but not with a usable key set;
-# what PyJWT refused when one entry fails the set; nothing for a connection error.
-FETCH_FAILURES: dict[str, tuple[Answer, str, str]] = {
-    "not JSON": (answer_raw(b"<html>login</html>"), "JSONDecodeError: Expecting value", HINT),
+# What the endpoint answers -> how the cause the warning names begins (its
+# type, plus PyJWT's message, but never Python's wording, which changes between
+# versions), and what the warning adds: the jwks_url hint when the endpoint
+# answered, but not with a usable key set; what PyJWT refused when one entry
+# fails the set; nothing for a connection error.
+FETCH_FAILURES: dict[str, tuple[Answer, str | tuple[str, ...], str]] = {
+    "not JSON": (answer_raw(b"<html>login</html>"), "JSONDecodeError: ", HINT),
     "not UTF-8": (answer_raw(b"\xff\xfe\x00"), "UnicodeDecodeError: ", HINT),
-    "nested too deeply": (answer_raw(b"[" * 100_000), "RecursionError: maximum recursion", HINT),
+    # Depending on the Python build, json runs out of stack or reports a syntax error.
+    "nested too deeply": (
+        answer_raw(b"[" * 100_000),
+        ("RecursionError: ", "JSONDecodeError: "),
+        HINT,
+    ),
     "not an object": (
         answer_json([GOOD_JWK]),
         "PyJWKClientError: The JWKS endpoint did not return a JSON object",
@@ -861,7 +868,7 @@ FETCH_FAILURES: dict[str, tuple[Answer, str, str]] = {
     ),
     "alg a list beside a good key": (
         answer_json({"keys": [{**GOOD_JWK, "alg": ["RS256"], "kid": "k0"}, GOOD_JWK]}),
-        "TypeError: unhashable type: 'list'",
+        "TypeError: ",
         REFUSED,
     ),
     "oct key without k beside a good key": (
@@ -871,15 +878,15 @@ FETCH_FAILURES: dict[str, tuple[Answer, str, str]] = {
     ),
     "not found": (
         answer_raw(b"", status=404),
-        CONNECTION_ERROR + '"HTTP Error 404',
+        CONNECTION_ERROR,
         "",
     ),
     "redirect": (
         answer_raw(b"", status=302),
-        CONNECTION_ERROR + '"HTTP Error 302',
+        CONNECTION_ERROR,
         "",
     ),
-    "endpoint down": (hang_up, HUNG_UP, ""),
+    "endpoint down": (hang_up, CONNECTION_ERROR, ""),
     "reset while answering": (reset_mid_answer, "ConnectionResetError: ", ""),
 }
 
@@ -889,14 +896,21 @@ FETCH_FAILURES: dict[str, tuple[Answer, str, str]] = {
     ("answer", "cause", "explanation"), FETCH_FAILURES.values(), ids=list(FETCH_FAILURES)
 )
 async def test_a_failed_fetch_rejects_the_token_with_one_warning(
-    jwks: FakeJwks, answer: Answer, cause: str, explanation: str, caplog: pytest.LogCaptureFixture
+    jwks: FakeJwks,
+    answer: Answer,
+    cause: str | tuple[str, ...],
+    explanation: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     jwks.answer = answer
     bearer = token()
     with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
         assert await make_verifier(jwks).verify_token(bearer) is None
     [warning] = warnings_in(caplog)
-    assert warning.startswith(f"cannot load the key set from {jwks.url}: {cause}")
+    causes = (cause,) if isinstance(cause, str) else cause
+    assert warning.startswith(
+        tuple(f"cannot load the key set from {jwks.url}: {c}" for c in causes)
+    )
     assert warning.count(jwks.url) == 1
     assert (HINT in warning) is (explanation == HINT)
     assert (REFUSED in warning) is (explanation == REFUSED)
