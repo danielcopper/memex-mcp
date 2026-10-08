@@ -11,9 +11,12 @@ from __future__ import annotations
 import os
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
 
 ENV_PREFIX = "MEMEX_"
 CONFIG_ENV = "MEMEX_CONFIG"
@@ -109,72 +112,84 @@ class Config:
     index: IndexConfig = field(default_factory=IndexConfig)
     embeddings: EmbeddingsConfig = field(default_factory=EmbeddingsConfig)
     # username (as Authentik sends it in `preferred_username`) -> area directory
-    users: Mapping[str, str] = field(default_factory=dict)
+    users: Mapping[str, str] = field(default_factory=dict[str, str])
 
     @property
     def jwks_url(self) -> str:
         return self.auth.jwks_url or self.auth.issuer.rstrip("/") + "/jwks/"
 
 
-_SECTIONS: dict[str, type] = {
-    "server": ServerConfig,
-    "auth": AuthConfig,
-    "rights": RightsConfig,
-    "repo": RepoConfig,
-    "index": IndexConfig,
-    "embeddings": EmbeddingsConfig,
-}
+# Every field of Config but `users` is a section of scalar and list settings.
+_SECTIONS = frozenset(f.name for f in fields(Config)) - {"users"}
 
 
-def _coerce(section: str, key: str, value: Any, default: Any) -> Any:
+def _coerce_bool(where: str, value: object) -> bool:
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, bool):
+        return value
+    raise ConfigError(f"{where} must be a boolean")
+
+
+def _coerce_number[N: (int, float)](kind: type[N], value: object, message: str) -> N:
+    # TOML and the environment give strings, numbers, booleans, lists, tables
+    # and dates; only the first three convert, the rest fail like a bad string.
+    if not isinstance(value, str | int | float):
+        raise ConfigError(message)
+    try:
+        return kind(value)
+    except ValueError:
+        raise ConfigError(message) from None
+
+
+def _coerce_strings(where: str, value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return tuple(part.strip() for part in value.split(",") if part.strip())
+    if isinstance(value, list):
+        items = cast("list[object]", value)
+        strings = [item for item in items if isinstance(item, str)]
+        if len(strings) == len(items):
+            return tuple(strings)
+    raise ConfigError(f"{where} must be a list of strings")
+
+
+def _coerce(section: str, key: str, value: object, default: object) -> object:
     where = f"[{section}] {key}"
     if isinstance(default, bool):
-        if isinstance(value, str):
-            lowered = value.strip().lower()
-            if lowered in {"1", "true", "yes", "on"}:
-                return True
-            if lowered in {"0", "false", "no", "off"}:
-                return False
-        if isinstance(value, bool):
-            return value
-        raise ConfigError(f"{where} must be a boolean")
+        return _coerce_bool(where, value)
     if isinstance(default, int):
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            raise ConfigError(f"{where} must be an integer") from None
+        return _coerce_number(int, value, f"{where} must be an integer")
     if isinstance(default, float):
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            raise ConfigError(f"{where} must be a number") from None
+        return _coerce_number(float, value, f"{where} must be a number")
     if isinstance(default, tuple):
-        if isinstance(value, str):
-            return tuple(part.strip() for part in value.split(",") if part.strip())
-        if isinstance(value, list) and all(isinstance(v, str) for v in value):
-            return tuple(value)
-        raise ConfigError(f"{where} must be a list of strings")
+        return _coerce_strings(where, value)
     if not isinstance(value, str):
         raise ConfigError(f"{where} must be a string")
     return value
 
 
-def _section(name: str, raw: Mapping[str, Any], env: Mapping[str, str]) -> Any:
-    cls = _SECTIONS[name]
-    defaults = cls()
-    known = {f.name for f in fields(cls)}
-    unknown = set(raw) - known
+def _section[S: DataclassInstance](
+    name: str, defaults: S, raw: Mapping[str, object], env: Mapping[str, str]
+) -> S:
+    # Typed as the table it is meant to be; any other value fails here as before.
+    table = cast("Mapping[str, object]", raw.get(name, {}))
+    known = {f.name for f in fields(defaults)}
+    unknown = set(table) - known
     if unknown:
         raise ConfigError(f"[{name}] has unknown keys: {', '.join(sorted(unknown))}")
-    values: dict[str, Any] = {}
-    for f in fields(cls):
-        default = getattr(defaults, f.name)
+    values: dict[str, object] = {}
+    for f in fields(defaults):
+        default = cast("object", getattr(defaults, f.name))
         env_name = f"{ENV_PREFIX}{name.upper()}_{f.name.upper()}"
         if env_name in env:
             values[f.name] = _coerce(name, f.name, env[env_name], default)
-        elif f.name in raw:
-            values[f.name] = _coerce(name, f.name, raw[f.name], default)
-    return cls(**values)
+        elif f.name in table:
+            values[f.name] = _coerce(name, f.name, table[f.name], default)
+    return replace(defaults, **values)
 
 
 def _check_area_name(name: str, where: str) -> None:
@@ -182,22 +197,35 @@ def _check_area_name(name: str, where: str) -> None:
         raise ConfigError(f"{where}: {name!r} is not a single, visible directory name")
 
 
-def build_config(raw: Mapping[str, Any], env: Mapping[str, str]) -> Config:
+def build_config(raw: Mapping[str, object], env: Mapping[str, str]) -> Config:
     """Build and validate a Config from parsed TOML and an environment."""
-    unknown = set(raw) - set(_SECTIONS) - {"users"}
+    unknown = set(raw) - _SECTIONS - {"users"}
     if unknown:
         raise ConfigError(f"unknown sections: {', '.join(sorted(unknown))}")
-    sections = {name: _section(name, raw.get(name, {}), env) for name in _SECTIONS}
+    server = _section("server", ServerConfig(), raw, env)
+    auth = _section("auth", AuthConfig(), raw, env)
+    rights = _section("rights", RightsConfig(), raw, env)
+    repo = _section("repo", RepoConfig(), raw, env)
+    index = _section("index", IndexConfig(), raw, env)
+    embeddings = _section("embeddings", EmbeddingsConfig(), raw, env)
     users_raw = raw.get("users", {})
     if not isinstance(users_raw, dict):
         raise ConfigError("[users] must map usernames to area directories")
     users: dict[str, str] = {}
-    for username, area in users_raw.items():
+    for username, area in cast("dict[object, object]", users_raw).items():
         if not isinstance(area, str):
             raise ConfigError(f"[users] {username}: the area must be a string")
         _check_area_name(area, f"[users] {username}")
         users[str(username)] = area
-    config = Config(**sections, users=users)
+    config = Config(
+        server=server,
+        auth=auth,
+        rights=rights,
+        repo=repo,
+        index=index,
+        embeddings=embeddings,
+        users=users,
+    )
     _validate(config)
     return config
 

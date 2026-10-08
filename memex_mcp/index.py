@@ -27,6 +27,7 @@ import threading
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import cast
 
 import sqlite_vec
 
@@ -143,13 +144,13 @@ class Index:
     """Thread-safe access to the index database; every method takes the lock."""
 
     def __init__(self, path: Path, chunk_chars: int, areas: frozenset[str]) -> None:
-        self._path = path
-        self._chunk_chars = chunk_chars
+        self._path: Path = path
+        self._chunk_chars: int = chunk_chars
         # The configured areas: the only ones indexed, each with its FTS5 table.
-        self._areas = areas
-        self._lock = threading.RLock()
+        self._areas: frozenset[str] = areas
+        self._lock: threading.RLock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
-        self.fresh = False
+        self.fresh: bool = False
 
     # -- lifecycle -------------------------------------------------------
 
@@ -200,7 +201,10 @@ class Index:
     @staticmethod
     def _read_schema_version(conn: sqlite3.Connection) -> int | None:
         try:
-            row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+            row = cast(
+                "tuple[str] | None",
+                conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone(),
+            )
         except sqlite3.DatabaseError:
             return None
         try:
@@ -224,14 +228,19 @@ class Index:
 
     def get_meta(self, key: str) -> str | None:
         with self._lock:
-            row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            row = cast(
+                "tuple[str] | None",
+                self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone(),
+            )
             return row[0] if row else None
 
     def set_meta(self, key: str, value: str) -> None:
         with self._lock:
             self.conn.execute(
-                "INSERT INTO meta (key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (
+                    "INSERT INTO meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+                ),
                 (key, value),
             )
 
@@ -250,7 +259,10 @@ class Index:
 
         The name is built from the area's integer id, never from its text.
         """
-        row = self.conn.execute("SELECT id FROM areas WHERE name = ?", (area,)).fetchone()
+        row = cast(
+            "tuple[int] | None",
+            self.conn.execute("SELECT id FROM areas WHERE name = ?", (area,)).fetchone(),
+        )
         if row is not None:
             return f"fts_{int(row[0])}"
         if not create:
@@ -263,7 +275,7 @@ class Index:
     def _delete_paths(self, paths: Iterable[str]) -> None:
         for path in paths:
             rows = self.conn.execute("SELECT id, area FROM chunks WHERE path = ?", (path,))
-            for chunk_id, area in rows.fetchall():
+            for chunk_id, area in cast("list[tuple[int, str]]", rows.fetchall()):
                 table = self._fts_table(area, create=False)
                 if table is not None:
                     self.conn.execute(f"DELETE FROM {table} WHERE rowid = ?", (chunk_id,))  # noqa: S608 - the name is fts_<integer>
@@ -281,8 +293,10 @@ class Index:
             raise RuntimeError(f"no search table for area {area!r}")
         for ord_, chunk in enumerate(chunk_note(text, self._chunk_chars)):
             cursor = self.conn.execute(
-                "INSERT INTO chunks (path, area, title, heading, body, ord, archived) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "INSERT INTO chunks (path, area, title, heading, body, ord, archived) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)"
+                ),
                 (relative, area, title, chunk.heading, chunk.body, ord_, archived),
             )
             self.conn.execute(
@@ -326,7 +340,8 @@ class Index:
             notes = list(iter_notes(root, self._areas))
             self.conn.execute("BEGIN")
             try:
-                for (area_id,) in self.conn.execute("SELECT id FROM areas").fetchall():
+                area_ids = self.conn.execute("SELECT id FROM areas").fetchall()
+                for (area_id,) in cast("list[tuple[int]]", area_ids):
                     self.conn.execute(f"DROP TABLE fts_{int(area_id)}")
                 self.conn.execute("DELETE FROM areas")
                 self.conn.execute("DELETE FROM chunks")
@@ -368,20 +383,27 @@ class Index:
     def missing_vectors(self, limit: int) -> list[tuple[int, str]]:
         """Chunks without a vector yet, with the text to embed."""
         with self._lock:
-            rows = self.conn.execute(
-                "SELECT c.id, c.title, c.heading, c.body FROM chunks c "
-                "LEFT JOIN chunk_vectors v ON v.chunk_id = c.id "
-                "WHERE v.chunk_id IS NULL ORDER BY c.id LIMIT ?",
-                (limit,),
-            ).fetchall()
+            rows = cast(
+                "list[tuple[int, str, str, str]]",
+                self.conn.execute(
+                    (
+                        "SELECT c.id, c.title, c.heading, c.body FROM chunks c "
+                        "LEFT JOIN chunk_vectors v ON v.chunk_id = c.id "
+                        "WHERE v.chunk_id IS NULL ORDER BY c.id LIMIT ?"
+                    ),
+                    (limit,),
+                ).fetchall(),
+            )
         return [(row[0], "\n".join(part for part in row[1:] if part)) for row in rows]
 
     def store_vectors(self, vectors: Sequence[tuple[int, list[float]]]) -> None:
         """Store vectors; a chunk deleted meanwhile is skipped (ids are never reused)."""
         with self._lock:
             self.conn.executemany(
-                "INSERT OR REPLACE INTO chunk_vectors (chunk_id, embedding) "
-                "SELECT ?, ? WHERE EXISTS (SELECT 1 FROM chunks WHERE id = ?)",
+                (
+                    "INSERT OR REPLACE INTO chunk_vectors (chunk_id, embedding) "
+                    "SELECT ?, ? WHERE EXISTS (SELECT 1 FROM chunks WHERE id = ?)"
+                ),
                 [(i, sqlite_vec.serialize_float32(v), i) for i, v in vectors],
             )
 
@@ -402,12 +424,17 @@ class Index:
                 table = self._fts_table(area, create=False)
                 if table is None:
                     continue
-                rows = self.conn.execute(
-                    f"SELECT c.id FROM {table} f JOIN chunks c ON c.id = f.rowid "  # noqa: S608 - the name is fts_<integer>
-                    f"WHERE {table} MATCH ? "
-                    f"ORDER BY bm25({table}, {_BM25_WEIGHTS}), c.path, c.ord LIMIT ?",
-                    (match, limit),
-                ).fetchall()
+                rows = cast(
+                    "list[tuple[int]]",
+                    self.conn.execute(
+                        (
+                            f"SELECT c.id FROM {table} f JOIN chunks c ON c.id = f.rowid "  # noqa: S608 - the name is fts_<integer>
+                            f"WHERE {table} MATCH ? "
+                            f"ORDER BY bm25({table}, {_BM25_WEIGHTS}), c.path, c.ord LIMIT ?"
+                        ),
+                        (match, limit),
+                    ).fetchall(),
+                )
                 rankings.append([row[0] for row in rows])
         return rankings
 
@@ -417,12 +444,17 @@ class Index:
             return []
         marks = ",".join("?" * len(areas))
         with self._lock:
-            rows = self.conn.execute(
-                f"SELECT c.id FROM chunk_vectors v JOIN chunks c ON c.id = v.chunk_id "  # noqa: S608 - only placeholders are interpolated
-                f"WHERE c.area IN ({marks}) "
-                f"ORDER BY vec_distance_cosine(v.embedding, ?), c.path, c.ord LIMIT ?",
-                (*sorted(areas), sqlite_vec.serialize_float32(vector), limit),
-            ).fetchall()
+            rows = cast(
+                "list[tuple[int]]",
+                self.conn.execute(
+                    (
+                        f"SELECT c.id FROM chunk_vectors v JOIN chunks c ON c.id = v.chunk_id "  # noqa: S608 - only placeholders are interpolated
+                        f"WHERE c.area IN ({marks}) "
+                        f"ORDER BY vec_distance_cosine(v.embedding, ?), c.path, c.ord LIMIT ?"
+                    ),
+                    (*sorted(areas), sqlite_vec.serialize_float32(vector), limit),
+                ).fetchall(),
+            )
         return [row[0] for row in rows]
 
     def chunks(self, ids: Iterable[int]) -> dict[int, ChunkRow]:
@@ -431,11 +463,16 @@ class Index:
             return {}
         marks = ",".join("?" * len(wanted))
         with self._lock:
-            rows = self.conn.execute(
-                f"SELECT id, path, area, title, heading, body, archived FROM chunks "  # noqa: S608 - only placeholders are interpolated
-                f"WHERE id IN ({marks})",
-                wanted,
-            ).fetchall()
+            rows = cast(
+                "list[tuple[int, str, str, str, str, str, int]]",
+                self.conn.execute(
+                    (
+                        f"SELECT id, path, area, title, heading, body, archived FROM chunks "  # noqa: S608 - only placeholders are interpolated
+                        f"WHERE id IN ({marks})"
+                    ),
+                    wanted,
+                ).fetchall(),
+            )
         return {
             row[0]: ChunkRow(row[0], row[1], row[2], row[3], row[4], row[5], bool(row[6]))
             for row in rows
@@ -443,13 +480,10 @@ class Index:
 
     def chunk_ids_for(self, path: str) -> list[int]:
         with self._lock:
-            return [
-                row[0]
-                for row in self.conn.execute(
-                    "SELECT id FROM chunks WHERE path = ? ORDER BY ord", (path,)
-                )
-            ]
+            rows = self.conn.execute("SELECT id FROM chunks WHERE path = ? ORDER BY ord", (path,))
+            return [row[0] for row in cast("Iterable[tuple[int]]", rows)]
 
     def paths(self) -> list[str]:
         with self._lock:
-            return [row[0] for row in self.conn.execute("SELECT DISTINCT path FROM chunks")]
+            rows = self.conn.execute("SELECT DISTINCT path FROM chunks")
+            return [row[0] for row in cast("Iterable[tuple[str]]", rows)]

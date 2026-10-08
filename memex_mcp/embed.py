@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, cast
 
 import httpx2
 
@@ -30,9 +30,9 @@ class OllamaEmbedder:
         dimensions: int,
         transport: httpx2.BaseTransport | None = None,
     ) -> None:
-        self.model = model
-        self.dimensions = dimensions
-        self._client = httpx2.Client(base_url=url.rstrip("/"), transport=transport)
+        self.model: str = model
+        self.dimensions: int = dimensions
+        self._client: httpx2.Client = httpx2.Client(base_url=url.rstrip("/"), transport=transport)
 
     def embed(self, texts: list[str], timeout: float) -> list[list[float]]:
         if not texts:
@@ -44,19 +44,25 @@ class OllamaEmbedder:
                 timeout=timeout,
             )
             response.raise_for_status()
-            payload = response.json()
+            payload = cast("object", response.json())
         except (httpx2.HTTPError, ValueError) as exc:
             raise EmbeddingError(f"{type(exc).__name__}: {exc}") from exc
-        vectors = payload.get("embeddings") if isinstance(payload, dict) else None
-        if not isinstance(vectors, list) or len(vectors) != len(texts):
+        # A JSON object's keys are strings, an array's items any JSON value.
+        vectors = (
+            cast("dict[str, object]", payload).get("embeddings")
+            if isinstance(payload, dict)
+            else None
+        )
+        if not isinstance(vectors, list) or len(cast("list[object]", vectors)) != len(texts):
             raise EmbeddingError("the embedder returned no embedding per input")
         result: list[list[float]] = []
-        for vector in vectors:
-            if not isinstance(vector, list) or len(vector) != self.dimensions:
+        for vector in cast("list[object]", vectors):
+            if not isinstance(vector, list) or len(cast("list[object]", vector)) != self.dimensions:
                 raise EmbeddingError(
                     f"the embedder returned a vector without {self.dimensions} dimensions"
                 )
-            result.append([float(value) for value in vector])
+            # Typed as the numbers it should hold; each value goes through float() as before.
+            result.append([float(value) for value in cast("list[float]", vector)])
         return result
 
     def close(self) -> None:

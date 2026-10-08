@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import TypedDict, cast
 
 import anyio
 import httpx2
@@ -16,12 +16,31 @@ import pytest
 from memex_mcp.auth import AuthentikTokenVerifier
 from memex_mcp.rights import ACCESS_DENIED
 from memex_mcp.server import build_app
-from memex_mcp.service import Memex
+from memex_mcp.service import Hit, Memex
 from tests.conftest import MARKER, Origin, make_config
 from tests.test_auth import CLIENT, ISSUER, JWKS_URL, KEY, FakeJwks, token
 
 BASE = "https://memex.example.org"
 HEADERS = {"accept": "application/json, text/event-stream", "content-type": "application/json"}
+
+
+class ListedTool(TypedDict):
+    """The parts of a tools/list entry these tests read."""
+
+    name: str
+    annotations: dict[str, object]
+
+
+class TextContent(TypedDict):
+    text: str
+
+
+class ToolCall(TypedDict):
+    """The parts of a tools/call result these tests read."""
+
+    isError: bool
+    content: list[TextContent]
+    structuredContent: dict[str, object]
 
 
 @pytest.fixture
@@ -32,7 +51,7 @@ def anyio_backend() -> str:
 @asynccontextmanager
 async def serve(
     tmp_path: Path, origin: Origin, run_loop: bool = False
-) -> AsyncIterator[httpx2.AsyncClient]:
+) -> AsyncGenerator[httpx2.AsyncClient, None]:
     """The app with its lifespan, entered and left in the test's own task."""
     config = make_config(tmp_path, origin, repo={"fetch_interval_seconds": 0.05})
     memex = Memex.from_config(config, embedder=None)
@@ -56,24 +75,22 @@ async def serve(
 async def rpc(
     client: httpx2.AsyncClient,
     method: str,
-    params: dict[str, Any] | None = None,
+    params: dict[str, object] | None = None,
     bearer: str | None = None,
 ) -> httpx2.Response:
     headers = dict(HEADERS)
     if bearer is not None:
         headers["authorization"] = f"Bearer {bearer}"
-    body: dict[str, Any] = {"jsonrpc": "2.0", "id": 1, "method": method}
+    body: dict[str, object] = {"jsonrpc": "2.0", "id": 1, "method": method}
     if params is not None:
         body["params"] = params
     return await client.post("/mcp", headers=headers, json=body)
 
 
-async def call(
-    client: httpx2.AsyncClient, bearer: str, tool: str, **arguments: Any
-) -> dict[str, Any]:
+async def call(client: httpx2.AsyncClient, bearer: str, tool: str, **arguments: object) -> ToolCall:
     response = await rpc(client, "tools/call", {"name": tool, "arguments": arguments}, bearer)
     assert response.status_code == 200, response.text
-    return response.json()["result"]
+    return cast("ToolCall", response.json()["result"])
 
 
 @pytest.mark.anyio
@@ -86,7 +103,7 @@ async def test_protected_resource_metadata_names_authentik(
     async with serve(tmp_path, origin) as client:
         response = await client.get(path)
         assert response.status_code == 200
-        metadata = response.json()
+        metadata = cast("dict[str, object]", response.json())
         assert metadata["resource"] == f"{BASE}/mcp"
         assert metadata["authorization_servers"] == [ISSUER]
         assert metadata["scopes_supported"] == ["openid", "profile", "offline_access"]
@@ -119,7 +136,8 @@ async def test_health_needs_no_token(tmp_path: Path, origin: Origin) -> None:
 async def test_tools_are_listed_read_only(tmp_path: Path, origin: Origin) -> None:
     async with serve(tmp_path, origin) as client:
         response = await rpc(client, "tools/list", bearer=token())
-        tools = {tool["name"]: tool for tool in response.json()["result"]["tools"]}
+        listed = cast("list[ListedTool]", response.json()["result"]["tools"])
+        tools = {tool["name"]: tool for tool in listed}
         assert set(tools) == {"search", "read", "list", "areas"}
         assert all(tool["annotations"]["readOnlyHint"] is True for tool in tools.values())
 
@@ -130,7 +148,7 @@ async def test_own_note_reads_and_foreign_note_does_not(tmp_path: Path, origin: 
         alice = token()
         own = await call(client, alice, "read", path="alice/memory/zebra.md")
         assert own["isError"] is False
-        assert MARKER in own["structuredContent"]["content"]
+        assert MARKER in cast("str", own["structuredContent"]["content"])
         foreign = await call(client, alice, "read", path="bob/memory/zebra.md")
         assert foreign["isError"] is True
         assert foreign["content"][0]["text"] == "no such note"
@@ -144,7 +162,7 @@ async def test_search_over_http_stays_inside_the_callers_areas(
     async with serve(tmp_path, origin) as client:
         bob = token(preferred_username="bob")
         result = await call(client, bob, "search", query=MARKER, limit=50)
-        hits = result["structuredContent"]["hits"]
+        hits = cast("list[Hit]", result["structuredContent"]["hits"])
         assert {hit["area"] for hit in hits} == {"bob", "household"}
         assert result["structuredContent"]["semantic"] is False
 
@@ -168,10 +186,10 @@ async def test_background_loop_picks_up_new_commits(tmp_path: Path, origin: Orig
     async with serve(tmp_path, origin, run_loop=True) as client:
         origin.commit("later", {"household/memory/later.md": "# Later\n\nnumbat sighting\n"})
         deadline = time.monotonic() + 10
-        hits: list[dict[str, Any]] = []
+        hits: list[Hit] = []
         while time.monotonic() < deadline and not hits:
             result = await call(client, token(), "search", query="numbat")
-            hits = result["structuredContent"]["hits"]
+            hits = cast("list[Hit]", result["structuredContent"]["hits"])
             await anyio.sleep(0.05)
         assert [hit["path"] for hit in hits] == ["household/memory/later.md"]
 

@@ -6,10 +6,10 @@ by pydantic at registration, and one bound depends on the config.
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
 from functools import partial
-from typing import Annotated, Any
+from typing import Annotated
 
 import anyio
 from fastmcp import FastMCP
@@ -89,7 +89,7 @@ def _caller() -> Identity:
         raise ToolError(str(exc)) from None
 
 
-async def _run(call: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+async def _run[T](call: Callable[[], T]) -> T:
     """Run a blocking service call off the event loop, turning refusals into tool errors."""
     try:
         return await anyio.to_thread.run_sync(call)
@@ -101,7 +101,7 @@ def build_mcp(
     config: Config, memex: Memex, auth: RemoteAuthProvider, run_loop: bool = True
 ) -> FastMCP:
     @asynccontextmanager
-    async def lifespan(_server: FastMCP) -> AsyncIterator[None]:
+    async def lifespan(_server: FastMCP) -> AsyncGenerator[None, None]:
         await anyio.to_thread.run_sync(memex.prepare)
         # A plain task rather than a task group: FastMCP may enter and leave
         # this lifespan from different tasks, which a cancel scope forbids.
@@ -127,13 +127,16 @@ def build_mcp(
         mask_error_details=True,
     )
 
+    # The tools return Mapping[str, object] so that their advertised output
+    # schema stays a free-form object; memex_mcp.service types each result.
     @mcp.tool(name="search", annotations=READ_ONLY)
     async def search(
         query: Annotated[
             str,
             Field(
-                description=f"What to look for: keywords or a question (at most "
-                f"{MAX_QUERY_WORDS} words).",
+                description=(
+                    f"What to look for: keywords or a question (at most {MAX_QUERY_WORDS} words)."
+                ),
                 max_length=MAX_QUERY_CHARS,
             ),
         ],
@@ -144,7 +147,7 @@ def build_mcp(
         limit: Annotated[
             int, Field(description="Maximum number of hits.", ge=1, le=config.index.max_limit)
         ] = 10,
-    ) -> dict[str, Any]:
+    ) -> Mapping[str, object]:
         """Search your memory notes by keywords and meaning.
 
         Returns one hit per note: path, area, title, a short snippet around the best
@@ -162,7 +165,7 @@ def build_mcp(
             str,
             Field(description=PATH_HELP),
         ],
-    ) -> dict[str, Any]:
+    ) -> Mapping[str, object]:
         """Read one memory note in full (Markdown), with its title and whether it is archived."""
         identity = _caller()
         return await _run(partial(memex.read, identity, path))
@@ -176,13 +179,13 @@ def build_mcp(
             str | None,
             Field(description=FOLDER_HELP),
         ] = None,
-    ) -> dict[str, Any]:
+    ) -> Mapping[str, object]:
         """List the notes and folders in a folder of one of your areas."""
         identity = _caller()
         return await _run(partial(memex.list, identity, area, folder))
 
     @mcp.tool(name="areas", annotations=READ_ONLY)
-    async def areas() -> dict[str, Any]:
+    async def areas() -> Mapping[str, object]:
         """List the memory areas you can search, read and list: your own and, if you
         belong to the household, the shared one."""
         identity = _caller()

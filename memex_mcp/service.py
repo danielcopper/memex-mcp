@@ -12,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Literal, NotRequired, TypedDict
 
 from memex_mcp.config import Config
 from memex_mcp.embed import Embedder, EmbeddingError
@@ -50,6 +50,45 @@ NOTICE_DISABLED = (
 
 class InvalidRequest(Exception):
     """The request itself is malformed (an empty query); the message is safe to show."""
+
+
+class Hit(TypedDict):
+    path: str
+    area: str
+    title: str
+    snippet: str
+    score: float
+    archived: bool
+
+
+class SearchResult(TypedDict):
+    semantic: bool
+    hits: list[Hit]
+    notice: NotRequired[str]
+
+
+class NoteResult(TypedDict):
+    path: str
+    area: str
+    title: str
+    archived: bool
+    content: str
+
+
+class AreasResult(TypedDict):
+    areas: list[str]
+
+
+class Entry(TypedDict):
+    name: str
+    path: str
+    type: Literal["folder", "note"]
+
+
+class ListResult(TypedDict):
+    area: str
+    folder: str
+    entries: list[Entry]
 
 
 def make_snippet(text: str, words: list[str], size: int) -> str:
@@ -112,7 +151,7 @@ class Memex:
 
     def search(
         self, identity: Identity, query: str, area: str | None = None, limit: int = 10
-    ) -> dict[str, Any]:
+    ) -> SearchResult:
         areas = self.policy.areas_for(identity)
         if area is not None:
             areas = frozenset({check_area(area, areas)})
@@ -149,7 +188,7 @@ class Memex:
 
         ordered = sorted(best.items(), key=lambda item: (-item[1][0], item[0]))[:limit]
         words = query_words(query)
-        hits: list[dict[str, Any]] = []
+        hits: list[Hit] = []
         for path, (score, chunk_id) in ordered:
             row = rows[chunk_id]
             text = row.body or row.heading
@@ -163,7 +202,7 @@ class Memex:
                     "archived": row.archived,
                 }
             )
-        result: dict[str, Any] = {"semantic": notice is None, "hits": hits}
+        result: SearchResult = {"semantic": notice is None, "hits": hits}
         if notice is not None:
             result["notice"] = notice
         return result
@@ -187,7 +226,7 @@ class Memex:
             return [], NOTICE_UNAVAILABLE
         return self.index.vector_ranked(vector, areas, pool), None
 
-    def read(self, identity: Identity, path: str) -> dict[str, Any]:
+    def read(self, identity: Identity, path: str) -> NoteResult:
         areas = self.policy.areas_for(identity)
         note = resolve_note(self.root, path, areas)
         content = note.real.read_text(encoding="utf-8", errors="replace")
@@ -199,14 +238,14 @@ class Memex:
             "content": content,
         }
 
-    def areas(self, identity: Identity) -> dict[str, Any]:
+    def areas(self, identity: Identity) -> AreasResult:
         """The caller's own areas, and nothing about anyone else's."""
         return {"areas": sorted(self.policy.areas_for(identity))}
 
-    def list(self, identity: Identity, area: str, folder: str | None = None) -> dict[str, Any]:
+    def list(self, identity: Identity, area: str, folder: str | None = None) -> ListResult:
         areas = self.policy.areas_for(identity)
         resolved = resolve_folder(self.root, area, folder, areas)
-        entries: list[dict[str, str]] = []
+        entries: list[Entry] = []
         for child in sorted(resolved.real.iterdir(), key=lambda p: p.name):
             # Hidden entries, symlinks and names that are not UTF-8 are never
             # listed; a listing shows only what reading and the index accept.

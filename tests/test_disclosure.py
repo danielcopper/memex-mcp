@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -42,7 +41,7 @@ from tests.conftest import (
 FOREIGN_AREAS = ("bob", "carol")
 
 
-def refusal(call: Callable[[], Any]) -> tuple[type[BaseException], str]:
+def refusal(call: Callable[[], object]) -> tuple[type[BaseException], str]:
     with pytest.raises((AccessDenied, NotFound)) as caught:
         call()
     return caught.type, str(caught.value)

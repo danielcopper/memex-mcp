@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -68,7 +67,7 @@ def test_explicit_jwks_url_wins(tmp_path: Path) -> None:
     ],
 )
 def test_required_settings(tmp_path: Path, section: str, key: str) -> None:
-    raw: dict[str, Any] = raw_config(tmp_path)
+    raw = raw_config(tmp_path)
     del raw[section][key]
     with pytest.raises(ConfigError, match=key):
         build_config(raw, {})

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import cast
 
 import httpx2
 import pytest
@@ -17,7 +18,7 @@ def embedder(handler: httpx2.MockTransport) -> OllamaEmbedder:
 def test_embeds_a_batch_in_order() -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
         assert request.url.path == "/api/embed"
-        body = json.loads(request.content)
+        body = cast("object", json.loads(request.content))
         assert body == {"model": "bge-m3", "input": ["a", "bb"]}
         return httpx2.Response(
             200, json={"model": "bge-m3", "embeddings": [[1, 0, 0], [0, 1, 0.5]]}
@@ -58,7 +59,7 @@ def test_unreachable_and_slow_hosts_raise_embedding_error() -> None:
 
 
 def test_nothing_to_embed_makes_no_request() -> None:
-    def fail(request: httpx2.Request) -> httpx2.Response:
+    def fail(_request: httpx2.Request) -> httpx2.Response:
         raise AssertionError("no request expected")
 
     assert embedder(httpx2.MockTransport(fail)).embed([], timeout=1.0) == []

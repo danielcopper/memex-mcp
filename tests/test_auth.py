@@ -7,7 +7,7 @@ import hmac
 import json
 import time
 from base64 import urlsafe_b64encode
-from typing import Any
+from typing import TypedDict
 
 import httpx2
 import jwt
@@ -32,7 +32,7 @@ def new_key() -> rsa.RSAPrivateKey:
     return rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
-def jwk_of(key: rsa.RSAPrivateKey, kid: str) -> dict[str, Any]:
+def jwk_of(key: rsa.RSAPrivateKey, kid: str) -> dict[str, object]:
     jwk = RSAAlgorithm.to_jwk(key.public_key(), as_dict=True)
     return {**jwk, "kid": kid, "alg": "RS256", "use": "sig"}
 
@@ -41,9 +41,9 @@ class FakeJwks:
     """The provider's JWKS endpoint; counts fetches and can go down."""
 
     def __init__(self, *keys: tuple[rsa.RSAPrivateKey, str]) -> None:
-        self.keys = list(keys)
-        self.fetches = 0
-        self.down = False
+        self.keys: list[tuple[rsa.RSAPrivateKey, str]] = list(keys)
+        self.fetches: int = 0
+        self.down: bool = False
 
     def handler(self, request: httpx2.Request) -> httpx2.Response:
         assert str(request.url) == JWKS_URL
@@ -55,7 +55,7 @@ class FakeJwks:
 
 class Clock:
     def __init__(self) -> None:
-        self.now = 1000.0
+        self.now: float = 1000.0
 
     def __call__(self) -> float:
         return self.now
@@ -64,10 +64,10 @@ class Clock:
 KEY = new_key()
 
 
-def claims(**overrides: Any) -> dict[str, Any]:
+def claims(**overrides: object) -> dict[str, object]:
     """What an Authentik access token carries for a user with the profile scope."""
     now = int(time.time())
-    base: dict[str, Any] = {
+    base: dict[str, object] = {
         "iss": ISSUER,
         "sub": "8f0c1d",
         "aud": CLIENT,
@@ -85,7 +85,7 @@ def claims(**overrides: Any) -> dict[str, Any]:
 
 
 def token(
-    key: rsa.RSAPrivateKey = KEY, kid: str = "k1", alg: str = "RS256", **overrides: Any
+    key: rsa.RSAPrivateKey = KEY, kid: str = "k1", alg: str = "RS256", **overrides: object
 ) -> str:
     return jwt.encode(claims(**overrides), key, algorithm=alg, headers={"kid": kid})
 
@@ -128,7 +128,22 @@ async def test_keys_are_cached(jwks: FakeJwks) -> None:
     assert jwks.fetches == 1
 
 
-REJECTED = {
+class ClaimOverrides(TypedDict, total=False):
+    """The claims a rejected case changes; None leaves a claim out."""
+
+    iss: str
+    aud: str
+    azp: str | None
+    uid: None
+    scope: None
+    exp: int | None
+    iat: int
+    groups: str | list[str | int] | None
+    preferred_username: str | None
+    sub: None
+
+
+REJECTED: dict[str, ClaimOverrides] = {
     "expired": {"exp": int(time.time()) - 3600, "iat": int(time.time()) - 7200},
     "wrong issuer": {"iss": "https://auth.example.org/application/o/other/"},
     "global issuer": {"iss": "https://auth.example.org/"},
@@ -147,7 +162,7 @@ REJECTED = {
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("overrides", REJECTED.values(), ids=list(REJECTED))
-async def test_bad_claims_are_rejected(jwks: FakeJwks, overrides: dict[str, Any]) -> None:
+async def test_bad_claims_are_rejected(jwks: FakeJwks, overrides: ClaimOverrides) -> None:
     assert await make_verifier(jwks).verify_token(token(**overrides)) is None
 
 
@@ -246,7 +261,7 @@ async def test_encryption_keys_and_keys_without_alg_are_handled() -> None:
     """Authentik lists an encryption key (use "enc") beside the signing key when one is set."""
     enc_key = new_key()
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
+    def handler(_request: httpx2.Request) -> httpx2.Response:
         signing = jwk_of(KEY, "k1")
         del signing["alg"]  # PyJWT derives RS256 from an RSA key
         encryption = {**jwk_of(enc_key, "e1"), "use": "enc", "alg": "RSA-OAEP-256"}
