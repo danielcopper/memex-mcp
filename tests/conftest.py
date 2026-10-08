@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -10,10 +11,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast, override
 
+import httpx2
 import pytest
 
 from memex_mcp.config import Config, build_config
-from memex_mcp.embed import Embedder, EmbeddingError
+from memex_mcp.embed import Embedder, EmbeddingError, OllamaEmbedder
 from memex_mcp.rights import Identity
 from memex_mcp.service import Memex
 
@@ -191,6 +193,22 @@ class FailingEmbedder(Embedder):
         self.calls += 1
         self.texts.extend(texts)
         raise EmbeddingError(self.message)
+
+
+def malformed_ollama() -> OllamaEmbedder:
+    """Ollama on a mocked transport that answers every text with a vector of nulls."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        texts = cast("dict[str, list[str]]", json.loads(request.content))["input"]
+        vectors = [[None] * FakeEmbedder.dimensions for _ in texts]
+        return httpx2.Response(200, json={"embeddings": vectors})
+
+    return OllamaEmbedder(
+        "http://ollama.example.org:11434",
+        FakeEmbedder.model,
+        FakeEmbedder.dimensions,
+        transport=httpx2.MockTransport(handler),
+    )
 
 
 @pytest.fixture

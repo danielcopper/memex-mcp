@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import cast, override
 
 import anyio
@@ -25,6 +25,7 @@ import httpx2
 import jwt
 from fastmcp.server.auth import AccessToken, TokenVerifier
 
+from memex_mcp.json_kind import json_kind
 from memex_mcp.rights import Identity
 
 log = logging.getLogger(__name__)
@@ -34,13 +35,67 @@ GROUPS_CLAIM = "groups"
 REQUIRED_CLAIMS = ["exp", "iat", "iss", "aud", "sub"]
 
 
-def _key_entries(document: object) -> Iterable[object]:
-    """The ``keys`` of a JWKS document as they come; none when the document is no object."""
+def _key_entries(document: object) -> list[object]:
+    """The ``keys`` of a JWKS document as they come; PyJWKSetError when it holds no list."""
     if not isinstance(document, dict):
-        return []
-    # A JSON object's keys are strings. A ``keys`` value that is not iterable
-    # raises TypeError when iterated, as it did before this was typed.
-    return cast("Iterable[object]", cast("dict[str, object]", document).get("keys", []))
+        raise jwt.PyJWKSetError(f"the key set is {json_kind(document)}, not an object")
+    members = cast("dict[str, object]", document)  # a JSON object's keys are strings
+    if "keys" not in members:
+        raise jwt.PyJWKSetError("the key set has no 'keys' member")
+    entries = members["keys"]
+    if not isinstance(entries, list):
+        raise jwt.PyJWKSetError(f"keys is {json_kind(entries)}, not a list")
+    return cast("list[object]", entries)
+
+
+def _malformed_member(data: dict[str, object]) -> str | None:
+    """What is wrong with the members a signing key is looked up by, or None."""
+    # All three are strings (RFC 7517); PyJWT looks `alg` up and the key set
+    # is keyed by `kid`, so a null one counts as absent. `use` restricts what
+    # the key may do: a null one is no answer, and the key is skipped.
+    for name in ("kid", "alg"):
+        value = data.get(name)
+        if not isinstance(value, str | None):
+            return f"{name} is {json_kind(value)}, not a string"
+    if "use" not in data:
+        return None
+    use = data["use"]
+    if not isinstance(use, str):
+        return f"use is {json_kind(use)}, not a string"
+    if use not in {"sig", "enc"}:
+        return f"use {use!r} is neither 'sig' nor 'enc'"
+    return None
+
+
+def _signing_key(index: int, entry: object) -> jwt.PyJWK | None:
+    """The signing key a JWKS entry describes, or None; a malformed entry is logged."""
+    if not isinstance(entry, dict):
+        log.warning("entry %d is %s, not an object; skipping it", index, json_kind(entry))
+        return None
+    data = cast("dict[str, object]", entry)  # a JSON object's keys are strings
+    problem = _malformed_member(data)
+    if problem is not None:
+        log.warning("entry %d: %s; skipping it", index, problem)
+        return None
+    # Authentik also lists the encryption key (use "enc") when one is set.
+    if data.get("use") == "enc":
+        return None
+    # PyJWT has no key form for alg "none" and says so with NotImplementedError.
+    try:
+        return jwt.PyJWK(data)
+    except (jwt.PyJWTError, NotImplementedError) as exc:
+        # Only the exception's type: PyJWT's messages may quote the whole key,
+        # private members included.
+        kty = data.get("kty")
+        log.warning(
+            "entry %d: unusable signing key (kid %r, kty %s, alg %r): %s",
+            index,
+            data.get("kid"),
+            repr(kty) if isinstance(kty, str | None) else json_kind(kty),
+            data.get("alg"),
+            type(exc).__name__,
+        )
+        return None
 
 
 class AuthentikTokenVerifier(TokenVerifier):
@@ -77,22 +132,39 @@ class AuthentikTokenVerifier(TokenVerifier):
         async with httpx2.AsyncClient(transport=self._transport, timeout=self.timeout) as client:
             response = await client.get(self.jwks_url)
             response.raise_for_status()
-            document = cast("object", response.json())
-        keys: dict[str | None, jwt.PyJWK] = {}
-        for entry in _key_entries(document):
-            if not isinstance(entry, dict):
-                continue
-            data = cast("dict[str, object]", entry)  # a JSON object's keys are strings
-            # Authentik also lists the encryption key (use "enc") when one is set.
-            if data.get("use", "sig") != "sig":
-                continue
             try:
-                key = jwt.PyJWK(data)
-            except jwt.PyJWTError as exc:
-                log.warning("skipping an unusable signing key %r: %s", data.get("kid"), exc)
-                continue
-            keys[key.key_id] = key
+                document = cast("object", response.json())
+            except ValueError:
+                content_type = response.headers.get("content-type")
+                raise jwt.PyJWKSetError(
+                    f"the answer is not JSON (content-type {content_type!r})"
+                ) from None
+        keys: dict[str | None, jwt.PyJWK] = {}
+        for index, entry in enumerate(_key_entries(document)):
+            key = _signing_key(index, entry)
+            if key is not None:
+                keys[key.key_id] = key
+        if not keys:
+            # A set without one usable signing key never replaces the cache; the
+            # token is rejected as when the endpoint does not answer.
+            raise jwt.PyJWKSetError("the key set has no usable signing key")
         self._keys = keys
+
+    def _log_failed_fetch(self, exc: Exception) -> None:
+        """The cached keys stay in use; the log says why the fetch failed and how many remain."""
+        # A PyJWKSetError means the URL answered, but not with a key set.
+        hint = "; is [auth] jwks_url the provider's JWKS endpoint?"
+        cached = len(self._keys)
+        log.warning(
+            "cannot load the signing keys from %s: %s: %s%s; %s",
+            self.jwks_url,
+            type(exc).__name__,
+            str(exc) or "no detail",
+            hint if isinstance(exc, jwt.PyJWKSetError) else "",
+            f"keeping {cached} cached key(s)"
+            if cached
+            else "no cached key: every token is rejected until a fetch succeeds",
+        )
 
     async def _key_for(self, kid: str | None) -> jwt.PyJWK | None:
         if kid in self._keys:
@@ -105,8 +177,7 @@ class AuthentikTokenVerifier(TokenVerifier):
                     try:
                         await self._fetch_keys()
                     except (httpx2.HTTPError, ValueError, jwt.PyJWTError) as exc:
-                        log.warning("cannot load the signing keys from %s: %s", self.jwks_url, exc)
-                        return None
+                        self._log_failed_fetch(exc)
         if kid in self._keys:
             return self._keys[kid]
         if kid is None and len(self._keys) == 1:
