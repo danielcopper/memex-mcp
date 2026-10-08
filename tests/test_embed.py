@@ -56,6 +56,9 @@ def test_embeds_a_batch_in_order() -> None:
         httpx2.Response(200, json={"embeddings": [[1, 1e39, 0]]}),
         raw_answer(b'{"embeddings": [[1, 1' + b"0" * 400 + b", 0]]}"),
         httpx2.Response(200, json={"embeddings": [[0, 0.0, -0.0]]}),
+        httpx2.Response(200, json={"embeddings": [[1e-30, 0, 0]]}),
+        httpx2.Response(200, json={"embeddings": [[1e-46, 0, 0]]}),
+        httpx2.Response(200, json={"model": "bge-m3", "error": "no such route"}),
     ],
     ids=[
         "http-500",
@@ -75,6 +78,9 @@ def test_embeds_a_batch_in_order() -> None:
         "value-too-large",
         "value-huge-int",
         "vector-zero",
+        "vector-near-zero",
+        "vector-subnormal",
+        "no-embeddings-member",
     ],
 )
 def test_bad_answers_raise_embedding_error(response: httpx2.Response) -> None:
@@ -107,9 +113,34 @@ def test_bad_answers_raise_embedding_error(response: httpx2.Response) -> None:
             ["a"],
             "value 2 of vector 0 is 1e+39",
         ),
-        (httpx2.Response(200, json={"embeddings": [[0, 0, 0]]}), ["a"], "vector 0 is all zeros"),
+        (
+            httpx2.Response(200, json={"embeddings": [[0, 0, 0]]}),
+            ["a"],
+            "vector 0 has (almost) no length",
+        ),
+        (
+            httpx2.Response(200, json={"embeddings": [[0, 1e-30, 0]]}),
+            ["a"],
+            "vector 0 has (almost) no length",
+        ),
+        (
+            httpx2.Response(200, json={"model": "bge-m3", "error": "no such route"}),
+            ["a"],
+            "the answer has no 'embeddings' member (it has: error, model); "
+            + "is [embeddings] url Ollama's API?",
+        ),
     ],
-    ids=["count", "embeddings-null", "vector-number", "dimensions", "type", "range", "zero"],
+    ids=[
+        "count",
+        "embeddings-null",
+        "vector-number",
+        "dimensions",
+        "type",
+        "range",
+        "zero",
+        "near-zero",
+        "no-embeddings-member",
+    ],
 )
 def test_embedding_errors_name_the_problem(
     response: httpx2.Response, texts: list[str], problem: str

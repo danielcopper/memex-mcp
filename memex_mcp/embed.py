@@ -11,6 +11,11 @@ from memex_mcp.json_kind import json_kind
 
 # sqlite-vec stores float32: a larger value would become infinite there.
 _FLOAT32_MAX = 3.4028234663852886e38
+# sqlite-vec computes cosine distance in float32, where a vector of almost
+# no length gives an infinite or NULL distance that sorts first (a length of
+# 1e-30 gives -inf). A squared length below this bound, a length of 1e-6,
+# is refused with a wide margin.
+_MIN_SQUARED_LENGTH = 1e-12
 
 
 class EmbeddingError(Exception):
@@ -46,9 +51,8 @@ def _vector(position: int, vector: object, dimensions: int) -> list[float]:
         if not math.isfinite(number) or abs(number) > _FLOAT32_MAX:
             raise EmbeddingError(f"{where} is {number!r}, outside the finite float32 range")
         result.append(number)
-    # Cosine distance to the zero vector is undefined; sqlite-vec answers NULL.
-    if not any(result):
-        raise EmbeddingError(f"vector {position} is all zeros")
+    if math.fsum(v * v for v in result) < _MIN_SQUARED_LENGTH:
+        raise EmbeddingError(f"vector {position} has (almost) no length")
     return result
 
 
@@ -82,7 +86,14 @@ class OllamaEmbedder:
         # A JSON object's keys are strings.
         if not isinstance(payload, dict):
             raise EmbeddingError(f"the answer is {json_kind(payload)}, not an object")
-        vectors = cast("dict[str, object]", payload).get("embeddings")
+        members = cast("dict[str, object]", payload)
+        if "embeddings" not in members:
+            names = ", ".join(sorted(members)) or "nothing"
+            raise EmbeddingError(
+                f"the answer has no 'embeddings' member (it has: {names}); "
+                + "is [embeddings] url Ollama's API?"
+            )
+        vectors = members["embeddings"]
         if not isinstance(vectors, list):
             raise EmbeddingError(f"embeddings is {json_kind(vectors)}, not a list")
         items = cast("list[object]", vectors)
