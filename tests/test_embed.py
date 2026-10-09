@@ -244,11 +244,48 @@ LOCATION = "http://ollama.example.org:11434/api/embed/"
             "HTTP 302 Found; redirected to " + repr("/x'\\" + "y" * 196 + "…"),
         ),
         (httpx2.Response(304), "HTTP 304 Not Modified"),
+        (httpx2.Response(300, headers={"location": LOCATION}), "HTTP 300 Multiple Choices"),
     ],
-    ids=["server-phrase", "unknown-code", "redirect", "redirect-escaped-and-cut", "no-location"],
+    ids=[
+        "server-phrase",
+        "unknown-code",
+        "redirect",
+        "redirect-escaped-and-cut",
+        "no-location",
+        "multiple-choices",
+    ],
 )
 def test_an_error_status_is_named_by_its_code(response: httpx2.Response, message: str) -> None:
     assert message_for(response) == message
+
+
+def raising(exc: Exception) -> httpx2.MockTransport:
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        raise exc
+
+    return httpx2.MockTransport(handler)
+
+
+@pytest.mark.parametrize(
+    ("exc", "message"),
+    [
+        (
+            # h11 quotes the bytes of a bad line from the wire; they can run to hundreds of KB.
+            httpx2.RemoteProtocolError("illegal header line: \x1b[31m" + "x" * 50_000),
+            "RemoteProtocolError: illegal header line: \\x1b[31m"
+            + "x" * (200 - len("illegal header line: \x1b[31m"))
+            + "…",
+        ),
+        (httpx2.ConnectError(""), "ConnectError: no detail"),
+        # Not the answer: the request itself ran out of stack.
+        (RecursionError("maximum recursion depth"), "RecursionError: maximum recursion depth"),
+    ],
+    ids=["long-protocol-error", "no-text", "recursion-while-sending"],
+)
+def test_a_failed_request_names_its_cause_escaped_and_cut(exc: Exception, message: str) -> None:
+    with pytest.raises(EmbeddingError) as raised:
+        embedder(raising(exc)).embed(["a"], timeout=1.0)
+    assert str(raised.value) == message
 
 
 def test_unreachable_and_slow_hosts_raise_embedding_error() -> None:

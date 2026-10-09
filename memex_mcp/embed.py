@@ -27,6 +27,11 @@ _MAX_SQUARED_LENGTH = _FLOAT32_MAX
 _MEMBER_NAMES = 10
 _NAME_CHARS = 64
 _ERROR_CHARS = 200
+# ... and at most this much of an exception's text, which can quote what came over the wire.
+_TEXT_CHARS = 200
+# The codes after which a Location header says where the answer moved (not 300, which
+# offers a choice).
+_REDIRECTS = frozenset({301, 302, 303, 307, 308})
 
 
 def _clip(text: str, chars: int) -> str:
@@ -34,8 +39,22 @@ def _clip(text: str, chars: int) -> str:
     return repr(text if len(text) <= chars else text[:chars] + "…")
 
 
+def _escaped(text: str, chars: int) -> str:
+    """``text`` cut to ``chars`` characters, backslashes and all but printable ASCII escaped.
+
+    Unlike ``repr`` it adds no quotes, so a message that needs no escaping reads as before.
+    """
+    escaped = text[:chars].encode("unicode_escape").decode("ascii")
+    return escaped if len(text) <= chars else escaped + "…"
+
+
 class EmbeddingError(Exception):
     """The embedder did not answer, answered too slowly, or answered nonsense."""
+
+
+def _failure(exc: Exception) -> EmbeddingError:
+    """An exception's type and text, escaped and cut, as an EmbeddingError."""
+    return EmbeddingError(f"{type(exc).__name__}: {_escaped(str(exc), _TEXT_CHARS) or 'no detail'}")
 
 
 class Embedder(Protocol):
@@ -96,7 +115,7 @@ def _status(response: httpx2.Response) -> str:
         phrase = ""
     status = f"HTTP {response.status_code} {phrase}".rstrip()
     location = response.headers.get("location")
-    if response.is_redirect and location is not None:
+    if response.status_code in _REDIRECTS and location is not None:
         status += f"; redirected to {_clip(location, _ERROR_CHARS)}"
     return status
 
@@ -133,11 +152,14 @@ class OllamaEmbedder:
                 timeout=timeout,
             )
             response.raise_for_status()
-            payload = cast("object", response.json())
         except httpx2.HTTPStatusError as exc:
             raise EmbeddingError(f"{_status(exc.response)}{_ollama_says(exc.response)}") from exc
-        except (httpx2.HTTPError, ValueError) as exc:
-            raise EmbeddingError(f"{type(exc).__name__}: {exc}") from exc
+        except (httpx2.HTTPError, ValueError, RecursionError) as exc:
+            raise _failure(exc) from exc
+        try:
+            payload = cast("object", response.json())
+        except ValueError as exc:
+            raise _failure(exc) from exc
         except RecursionError as exc:
             raise EmbeddingError("the answer is nested too deeply") from exc
         # A JSON object's keys are strings.
