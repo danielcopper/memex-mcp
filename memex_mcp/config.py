@@ -444,20 +444,32 @@ def _check_urls(config: Config, origins: _Origins) -> None:
             raise ConfigError(f"{origins.where(section, key)} {problem}")
 
 
-def _validate(config: Config, origins: _Origins) -> None:
-    missing = [
-        origins.where(section, key)
-        for section, key, value in (
-            ("server", "public_url", config.server.public_url),
-            ("auth", "issuer", config.auth.issuer),
-            ("auth", "client_ids", config.auth.client_ids),
-            ("repo", "path", config.repo.path),
-            ("index", "path", config.index.path),
-        )
-        if not value
+def _check_required(config: Config, origins: _Origins) -> None:
+    required: list[tuple[str, str, object]] = [
+        ("server", "public_url", config.server.public_url),
+        ("auth", "issuer", config.auth.issuer),
+        ("auth", "client_ids", config.auth.client_ids),
+        ("rights", "access_group", config.rights.access_group),
+        ("rights", "household_group", config.rights.household_group),
+        ("repo", "path", config.repo.path),
+        ("repo", "branch", config.repo.branch),
+        ("index", "path", config.index.path),
     ]
+    if config.embeddings.enabled:
+        required += [
+            ("embeddings", "url", config.embeddings.url),
+            ("embeddings", "model", config.embeddings.model),
+        ]
+    missing = [origins.where(section, key) for section, key, value in required if not value]
     if missing:
         raise ConfigError(f"missing required settings: {', '.join(missing)}")
+
+
+def _validate(config: Config, origins: _Origins) -> None:
+    _check_required(config, origins)
+    # git would read such a branch as an option, not a ref.
+    if config.repo.branch.startswith("-"):
+        raise ConfigError(f"{origins.where('repo', 'branch')} must not start with '-'")
     _check_urls(config, origins)
     if not config.server.mcp_path.startswith("/"):
         raise ConfigError(f"{origins.where('server', 'mcp_path')} must start with '/'")

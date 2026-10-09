@@ -618,3 +618,41 @@ def test_a_quoted_number_or_boolean_comes_only_from_the_environment(
     assert _refusal(raw) == f"[{section}] {key} must be {kind} without quotes, got {value!r}"
     env_name = f"MEMEX_{section.upper()}_{key.upper()}"
     assert _settings(build_config(raw_config(tmp_path), {env_name: value}))[section][key] == read
+
+
+@pytest.mark.parametrize(
+    ("section", "key"),
+    [
+        ("rights", "access_group"),
+        ("rights", "household_group"),
+        ("repo", "branch"),
+        ("embeddings", "url"),
+        ("embeddings", "model"),
+    ],
+)
+def test_an_empty_setting_the_server_needs_is_missing(
+    tmp_path: Path, section: str, key: str
+) -> None:
+    env_name = f"MEMEX_{section.upper()}_{key.upper()}"
+    message = _refusal(raw_config(tmp_path), {env_name: ""})
+    assert message == f"missing required settings: [{section}] {key} from {env_name}"
+    raw = raw_config(tmp_path)
+    raw.setdefault(section, {})[key] = ""
+    assert _refusal(raw) == f"missing required settings: [{section}] {key}"
+
+
+@pytest.mark.parametrize("key", ["url", "model"])
+def test_the_embedder_settings_may_be_empty_while_disabled(tmp_path: Path, key: str) -> None:
+    raw = raw_config(tmp_path)
+    raw["embeddings"].update({key: "", "enabled": False})
+    assert _settings(build_config(raw, {}))["embeddings"][key] == ""
+
+
+@pytest.mark.parametrize("branch", ["--upload-pack=s3cret", "-x"])
+def test_a_branch_that_git_would_read_as_an_option_is_refused(tmp_path: Path, branch: str) -> None:
+    raw = raw_config(tmp_path)
+    raw["repo"]["branch"] = branch
+    assert _refusal(raw) == "[repo] branch must not start with '-'"
+    assert _refusal(raw_config(tmp_path), {"MEMEX_REPO_BRANCH": branch}) == (
+        "[repo] branch from MEMEX_REPO_BRANCH must not start with '-'"
+    )
