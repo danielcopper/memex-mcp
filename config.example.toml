@@ -3,16 +3,21 @@
 # MEMEX_AUTH_CLIENT_IDS (comma-separated). All values below are examples.
 # Each number setting states its range below; one marked as a whole number
 # takes no decimal point, the others may have one. Numbers and booleans go
-# without quotes here; only an environment variable gives them as text.
+# without quotes here; only an environment variable gives them as text. The
+# branch, the paths and the area names take no whitespace or control
+# characters.
 
 [server]
 host = "0.0.0.0"
 # A whole number, 1 to 65535.
 port = 8000
-# The URL clients use; the resource advertised to them is public_url + mcp_path.
-# https, or http to localhost, 127.0.0.1 or [::1]; the same holds for the
-# issuer and jwks_url below.
+# The URL clients use: scheme, host and port only; the resource advertised to
+# them is public_url + mcp_path. https, or http to localhost, 127.0.0.1 or
+# [::1], and no user or password; the same holds for the issuer and jwks_url
+# below, which may have a path.
 public_url = "https://memex.example.org"
+# A simple path: letters, digits and . _ ~ - between slashes, no "." or ".."
+# segment.
 mcp_path = "/mcp"
 log_level = "INFO"
 
