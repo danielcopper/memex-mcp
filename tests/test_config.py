@@ -384,7 +384,7 @@ def test_a_refused_url_is_never_shown(tmp_path: Path, section: str, key: str, ur
 
 def test_a_refused_string_is_never_shown(tmp_path: Path) -> None:
     message = _refusal(raw_config(tmp_path), {"MEMEX_SERVER_MCP_PATH": "secret"})
-    assert message == "[server] mcp_path from MEMEX_SERVER_MCP_PATH must start with '/'"
+    assert message == "[server] mcp_path from MEMEX_SERVER_MCP_PATH must be a path such as /mcp"
     raw = raw_config(tmp_path)
     raw["server"]["log_level"] = "secret"
     assert "secret" not in _refusal(raw)
@@ -789,3 +789,63 @@ def test_an_https_url_carries_no_user_or_password(
         assert message.endswith(" must not carry a user or password")
         assert "s3cret" not in message
         assert "example" not in message
+
+
+@pytest.mark.parametrize("path", ["/mcp", "/mcp/", "/a/b-c_d.e~f", "/...", "/.x"])
+def test_a_simple_mcp_path_is_accepted(tmp_path: Path, path: str) -> None:
+    raw = raw_config(tmp_path)
+    raw["server"]["mcp_path"] = path
+    assert build_config(raw, {}).server.mcp_path == path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "mcp",
+        "/",
+        "//mcp",
+        "/mcp?x=1",
+        "/mcp#f",
+        "/m c p",
+        "/{x}",
+        "/mcp/{x}",
+        "/mcp\x00",
+        "/mcp\n",
+        "/..",
+        "/.",
+        "/mcp/..",
+        "/./mcp",
+    ],
+)
+def test_an_mcp_path_the_server_cannot_mount_is_refused(tmp_path: Path, path: str) -> None:
+    raw = raw_config(tmp_path)
+    raw["server"]["mcp_path"] = path
+    assert _refusal(raw) == "[server] mcp_path must be a path such as /mcp"
+
+
+@pytest.mark.parametrize(
+    ("section", "key"), [("repo", "branch"), ("repo", "path"), ("index", "path")]
+)
+@pytest.mark.parametrize("value", ["main\n", " main", "ma in", "ma\x00in", "ma\tin"])
+def test_a_name_git_or_the_file_system_takes_as_given_is_refused(
+    tmp_path: Path, section: str, key: str, value: str
+) -> None:
+    raw = raw_config(tmp_path)
+    raw[section][key] = value
+    assert _refusal(raw) == f"[{section}] {key} contains whitespace or control characters"
+    env_name = f"MEMEX_{section.upper()}_{key.upper()}"
+    assert _refusal(raw_config(tmp_path), {env_name: value}) == (
+        f"[{section}] {key} from {env_name} contains whitespace or control characters"
+    )
+
+
+@pytest.mark.parametrize("area", ["household ", "house\nhold", "house\x00hold", "\u200bhousehold"])
+def test_an_area_name_with_whitespace_or_control_characters_is_refused(
+    tmp_path: Path, area: str
+) -> None:
+    raw = raw_config(tmp_path)
+    raw["rights"] = {"household_area": area}
+    assert _refusal(raw) == "[rights] household_area contains whitespace or control characters"
+    raw = raw_config(tmp_path)
+    raw["users"] = {"eve": area}
+    assert _refusal(raw) == "[users] 'eve' contains whitespace or control characters"

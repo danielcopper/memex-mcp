@@ -197,6 +197,10 @@ _ASYMMETRIC_ALGORITHMS = frozenset(
     if not isinstance(algorithm, HMACAlgorithm | NoneAlgorithm)
 )
 
+# A path the server can mount the MCP endpoint at: segments of unreserved URL
+# characters other than "." and "..", with or without a trailing slash.
+_MCP_PATH = re.compile(r"(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._~-]+)+/?")
+
 # Hosts a URL that needs https may still reach over plain http.
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
@@ -368,7 +372,13 @@ def _section[S: DataclassInstance](
     return replace(defaults, **values)
 
 
+def _has_space_or_control(text: str) -> bool:
+    return any(char.isspace() or not char.isprintable() for char in text)
+
+
 def _check_area_name(name: str, where: str) -> None:
+    if _has_space_or_control(name):
+        raise ConfigError(f"{where} contains whitespace or control characters")
     if not name or "/" in name or "\\" in name or name.startswith(".") or name in {"..", "."}:
         raise ConfigError(f"{where} is not a single, visible directory name")
 
@@ -471,7 +481,7 @@ def _url_problem(url: str, *, https: bool, origin: bool = False) -> str | None:
     ``origin``: scheme, host and port only.
     """
     # urlsplit drops these before it parses; the server uses the URL as given.
-    if any(char.isspace() or not char.isprintable() for char in url):
+    if _has_space_or_control(url):
         return "contains whitespace or control characters"
     parts = _split(url)
     if parts is None:
@@ -534,15 +544,29 @@ def _check_algorithms(config: Config, origins: _Origins) -> None:
             raise ConfigError(f"{where} has {_shown(algorithm)}, not one of {allowed}")
 
 
-def _validate(config: Config, origins: _Origins) -> None:
-    _check_required(config, origins)
-    _check_algorithms(config, origins)
+def _check_names(config: Config, origins: _Origins) -> None:
+    # git and the file system take these as given: a trailing newline from a
+    # secret file or a NUL would fail every fetch or every read.
+    for section, key, value in (
+        ("repo", "branch", config.repo.branch),
+        ("repo", "path", config.repo.path),
+        ("index", "path", config.index.path),
+    ):
+        if _has_space_or_control(value):
+            where = origins.where(section, key)
+            raise ConfigError(f"{where} contains whitespace or control characters")
     # git would read such a branch as an option, not a ref.
     if config.repo.branch.startswith("-"):
         raise ConfigError(f"{origins.where('repo', 'branch')} must not start with '-'")
+    if not _MCP_PATH.fullmatch(config.server.mcp_path):
+        raise ConfigError(f"{origins.where('server', 'mcp_path')} must be a path such as /mcp")
+
+
+def _validate(config: Config, origins: _Origins) -> None:
+    _check_required(config, origins)
+    _check_algorithms(config, origins)
+    _check_names(config, origins)
     _check_urls(config, origins)
-    if not config.server.mcp_path.startswith("/"):
-        raise ConfigError(f"{origins.where('server', 'mcp_path')} must start with '/'")
     # The server hands the upper-cased name to logging.basicConfig.
     if config.server.log_level.upper() not in logging.getLevelNamesMapping():
         where = origins.where("server", "log_level")
