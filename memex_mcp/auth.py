@@ -63,6 +63,9 @@ _HINT = "; is [auth] jwks_url the provider's JWKS endpoint?"
 # The derived jwks_url follows the issuer, so a wrong issuer path ends here too.
 _NOT_FOUND = "; check [auth] jwks_url, by default the issuer's path plus jwks/"
 
+# What a token with an issuer other than [auth] issuer most likely is.
+_ISSUER_CAUSES = "(a token for another application, or a wrong [auth] issuer)"
+
 # What PyJWT raises out of a single entry when that entry makes it refuse the
 # whole set (see _FETCH_ERRORS); no other fetch was seen to raise these.
 _ENTRY_ERRORS = (TypeError, NotImplementedError, KeyError)
@@ -416,10 +419,15 @@ class AuthentikTokenVerifier(TokenVerifier):
                 ),
             )
         except jwt.InvalidIssuerError:
-            # PyJWT checks the claims only after the signature, so only the
-            # provider can cause this line: its issuer differs from [auth] issuer.
+            # PyJWT checks the claims only after the signature, so a key in the
+            # provider's set signed this token. Authentik providers often share one
+            # signing certificate (and kid), so a token issued for another
+            # application ends here too, not only a wrong [auth] issuer.
             log.warning(
-                "bearer token rejected: issuer %s, expected %r", _issuer_of(token), self.issuer
+                "bearer token rejected: issuer %s, expected %r %s",
+                _issuer_of(token),
+                self.issuer,
+                _ISSUER_CAUSES,
             )
             return None
         except jwt.PyJWTError as exc:

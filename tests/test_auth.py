@@ -297,7 +297,10 @@ async def test_a_wrong_issuer_is_logged_at_warning_with_both_issuers(
     bearer = jwt.PyJWS().encode(payload, KEY, algorithm="RS256", headers={"kid": "k1"})
     with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
         assert await make_verifier(jwks).verify_token(bearer) is None
-    assert warnings_in(caplog) == [f"bearer token rejected: issuer {shown}, expected {ISSUER!r}"]
+    assert warnings_in(caplog) == [
+        f"bearer token rejected: issuer {shown}, expected {ISSUER!r} "
+        + "(a token for another application, or a wrong [auth] issuer)"
+    ]
     assert bearer not in caplog.text
 
 
