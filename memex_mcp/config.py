@@ -496,6 +496,10 @@ def _url_problem(url: str, *, https: bool, origin: bool = False) -> str | None:
     # the server uses the URL as given.
     if _has_space_or_control(url):
         return "contains whitespace or control characters"
+    # urlsplit keeps a backslash in the host part, pydantic reads it as "/":
+    # the two would disagree about the path.
+    if "\\" in url:
+        return "is not a valid URL"
     parts = _split(url)
     if parts is None:
         return "is not a valid URL"

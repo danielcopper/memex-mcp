@@ -885,3 +885,24 @@ def test_a_file_with_a_byte_order_mark_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as caught:
         load_config(path, env={})
     assert str(caught.value) == f"config {path} starts with a byte-order mark; save it without one"
+
+
+@pytest.mark.parametrize(("section", "key"), URL_SETTINGS)
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://memex.example.org\\sub",
+        "https://auth.example.org\\application\\o\\memex\\",
+        "https://u:s3cret@auth.example.org\\x",
+        "http://localhost:9000\\",
+    ],
+)
+def test_a_url_with_a_backslash_is_refused(
+    tmp_path: Path, section: str, key: str, url: str
+) -> None:
+    for env in (False, True):
+        refusal = _url_refusal(tmp_path, section, key, url, env=env)
+        assert str(refusal).endswith(" is not a valid URL")
+        for part in ("example", "localhost", "s3cret", "\\"):
+            assert part not in str(refusal)
+        assert refusal.__context__ is None
