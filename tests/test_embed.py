@@ -58,6 +58,7 @@ def test_embeds_a_batch_in_order() -> None:
         httpx2.Response(200, json={"embeddings": [[0, 0.0, -0.0]]}),
         httpx2.Response(200, json={"embeddings": [[1e-30, 0, 0]]}),
         httpx2.Response(200, json={"embeddings": [[1e-46, 0, 0]]}),
+        httpx2.Response(200, json={"embeddings": [[1.9e19, 0, 0]]}),
         httpx2.Response(200, json={"model": "bge-m3", "error": "no such route"}),
     ],
     ids=[
@@ -80,6 +81,7 @@ def test_embeds_a_batch_in_order() -> None:
         "vector-zero",
         "vector-near-zero",
         "vector-subnormal",
+        "vector-too-long",
         "no-embeddings-member",
     ],
 )
@@ -124,9 +126,14 @@ def test_bad_answers_raise_embedding_error(response: httpx2.Response) -> None:
             "vector 0 has (almost) no length",
         ),
         (
+            httpx2.Response(200, json={"embeddings": [[0, 1.9e19, 0]]}),
+            ["a"],
+            "vector 0 is too long: its squared length overflows float32",
+        ),
+        (
             httpx2.Response(200, json={"model": "bge-m3", "error": "no such route"}),
             ["a"],
-            "the answer has no 'embeddings' member (it has: error, model); "
+            "the answer has no 'embeddings' member (it has: 'error', 'model'); "
             + "is [embeddings] url Ollama's API?",
         ),
     ],
@@ -139,6 +146,7 @@ def test_bad_answers_raise_embedding_error(response: httpx2.Response) -> None:
         "range",
         "zero",
         "near-zero",
+        "too-long",
         "no-embeddings-member",
     ],
 )
@@ -147,6 +155,68 @@ def test_embedding_errors_name_the_problem(
 ) -> None:
     with pytest.raises(EmbeddingError, match=re.escape(problem)):
         embedder(httpx2.MockTransport(lambda _request: response)).embed(texts, timeout=1.0)
+
+
+def test_a_vector_just_inside_float32_is_accepted() -> None:
+    # Its squared length, 3.24e38, is just below float32's largest value.
+    response = httpx2.Response(200, json={"embeddings": [[1.8e19, 0, 0]]})
+    vectors = embedder(httpx2.MockTransport(lambda _request: response)).embed(["a"], timeout=1.0)
+    assert vectors == [[1.8e19, 0.0, 0.0]]
+
+
+def message_for(response: httpx2.Response) -> str:
+    with pytest.raises(EmbeddingError) as raised:
+        embedder(httpx2.MockTransport(lambda _request: response)).embed(["a"], timeout=1.0)
+    return str(raised.value)
+
+
+def test_member_names_are_escaped_and_at_most_ten() -> None:
+    members = {f"m{index:02}": 1 for index in range(14)} | {"a\nforged": 1, "b" * 100: 1}
+    assert message_for(httpx2.Response(200, json=members)) == (
+        "the answer has no 'embeddings' member (it has: 'a\\nforged', "
+        + repr("b" * 64 + "…")
+        + ", "
+        + ", ".join(repr(f"m{index:02}") for index in range(8))
+        + " and 6 more); is [embeddings] url Ollama's API?"
+    )
+
+
+OLLAMA_ERROR = 'model "bge-m3" not found, try pulling it first'
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        (
+            httpx2.Response(404, json={"error": OLLAMA_ERROR}),
+            f"HTTP 404 Not Found; Ollama says {OLLAMA_ERROR!r}",
+        ),
+        (
+            httpx2.Response(500, json={"error": "line\nforged" + "x" * 300}),
+            "HTTP 500 Internal Server Error; Ollama says "
+            + repr("line\nforged" + "x" * (200 - len("line\nforged")) + "…"),
+        ),
+        (httpx2.Response(500, text="model not loaded"), "HTTP 500 Internal Server Error"),
+        (httpx2.Response(500, json={"error": 5}), "HTTP 500 Internal Server Error"),
+        (httpx2.Response(500, json=["error"]), "HTTP 500 Internal Server Error"),
+        (
+            httpx2.Response(500, content=b"[" * 100_000 + b"]" * 100_000),
+            "HTTP 500 Internal Server Error",
+        ),
+    ],
+    ids=[
+        "model-missing",
+        "escaped-and-cut",
+        "not-json",
+        "error-not-text",
+        "not-an-object",
+        "nested-too-deeply",
+    ],
+)
+def test_an_error_status_carries_ollamas_own_error_text(
+    response: httpx2.Response, message: str
+) -> None:
+    assert message_for(response) == message
 
 
 def test_unreachable_and_slow_hosts_raise_embedding_error() -> None:

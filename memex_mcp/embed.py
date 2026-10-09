@@ -16,6 +16,19 @@ _FLOAT32_MAX = 3.4028234663852886e38
 # 1e-30 gives -inf). A squared length below this bound, a length of 1e-6,
 # is refused with a wide margin.
 _MIN_SQUARED_LENGTH = 1e-12
+# A squared length beyond float32 overflows there, and the distance to every
+# vector becomes a flat 1.0, which sorts last.
+_MAX_SQUARED_LENGTH = _FLOAT32_MAX
+# An error message names at most this many of the answer's members, each cut
+# to this many characters, and carries at most this much of Ollama's own error text.
+_MEMBER_NAMES = 10
+_NAME_CHARS = 64
+_ERROR_CHARS = 200
+
+
+def _clip(text: str, chars: int) -> str:
+    """``text`` cut to ``chars`` characters, escaped, for a message."""
+    return repr(text if len(text) <= chars else text[:chars] + "…")
 
 
 class EmbeddingError(Exception):
@@ -51,9 +64,30 @@ def _vector(position: int, vector: object, dimensions: int) -> list[float]:
         if not math.isfinite(number) or abs(number) > _FLOAT32_MAX:
             raise EmbeddingError(f"{where} is {number!r}, outside the finite float32 range")
         result.append(number)
-    if math.fsum(v * v for v in result) < _MIN_SQUARED_LENGTH:
+    squared_length = math.fsum(v * v for v in result)
+    if squared_length < _MIN_SQUARED_LENGTH:
         raise EmbeddingError(f"vector {position} has (almost) no length")
+    if squared_length > _MAX_SQUARED_LENGTH:
+        raise EmbeddingError(f"vector {position} is too long: its squared length overflows float32")
     return result
+
+
+def _ollama_says(response: httpx2.Response) -> str:
+    """Ollama's own error text from an error answer, as a message suffix; empty if none."""
+    try:
+        payload = cast("object", response.json())
+    except (ValueError, RecursionError):
+        return ""
+    error = cast("dict[str, object]", payload).get("error") if isinstance(payload, dict) else None
+    return f"; Ollama says {_clip(error, _ERROR_CHARS)}" if isinstance(error, str) else ""
+
+
+def _member_names(members: dict[str, object]) -> str:
+    """The answer's member names for a message, escaped, cut and counted."""
+    names = sorted(members)
+    shown = ", ".join(_clip(name, _NAME_CHARS) for name in names[:_MEMBER_NAMES]) or "nothing"
+    more = len(names) - _MEMBER_NAMES
+    return f"{shown} and {more} more" if more > 0 else shown
 
 
 class OllamaEmbedder:
@@ -81,6 +115,9 @@ class OllamaEmbedder:
             )
             response.raise_for_status()
             payload = cast("object", response.json())
+        except httpx2.HTTPStatusError as exc:
+            status = f"HTTP {exc.response.status_code} {exc.response.reason_phrase}"
+            raise EmbeddingError(f"{status}{_ollama_says(exc.response)}") from exc
         except (httpx2.HTTPError, ValueError) as exc:
             raise EmbeddingError(f"{type(exc).__name__}: {exc}") from exc
         # A JSON object's keys are strings.
@@ -88,9 +125,8 @@ class OllamaEmbedder:
             raise EmbeddingError(f"the answer is {json_kind(payload)}, not an object")
         members = cast("dict[str, object]", payload)
         if "embeddings" not in members:
-            names = ", ".join(sorted(members)) or "nothing"
             raise EmbeddingError(
-                f"the answer has no 'embeddings' member (it has: {names}); "
+                f"the answer has no 'embeddings' member (it has: {_member_names(members)}); "
                 + "is [embeddings] url Ollama's API?"
             )
         vectors = members["embeddings"]
