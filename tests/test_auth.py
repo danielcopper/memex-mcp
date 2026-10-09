@@ -279,6 +279,28 @@ async def test_bad_claims_are_rejected(jwks: FakeJwks, overrides: ClaimOverrides
     assert await make_verifier(jwks).verify_token(token(**overrides)) is None
 
 
+WRONG_ISSUERS: dict[str, tuple[object, str]] = {
+    "without the trailing slash": (ISSUER.rstrip("/"), repr(ISSUER.rstrip("/"))),
+    "with a line break": (f"{ISSUER}\nforged", repr(f"{ISSUER}\nforged")),
+    "long": (ISSUER + "x" * 1000, repr(ISSUER + "x" * (200 - len(ISSUER)) + "…")),
+    "not a string": ([ISSUER], "a list"),
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("iss", "shown"), WRONG_ISSUERS.values(), ids=list(WRONG_ISSUERS))
+async def test_a_wrong_issuer_is_logged_at_warning_with_both_issuers(
+    jwks: FakeJwks, iss: object, shown: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Signed as JWS: PyJWT's encode refuses an `iss` that is not a string.
+    payload = json.dumps(claims(iss=iss)).encode()
+    bearer = jwt.PyJWS().encode(payload, KEY, algorithm="RS256", headers={"kid": "k1"})
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(bearer) is None
+    assert warnings_in(caplog) == [f"bearer token rejected: issuer {shown}, expected {ISSUER!r}"]
+    assert bearer not in caplog.text
+
+
 @pytest.mark.anyio
 async def test_expiry_within_leeway_is_accepted(jwks: FakeJwks) -> None:
     now = int(time.time())
@@ -711,12 +733,12 @@ async def test_a_malformed_entry_does_not_hide_the_good_key(
             assert await verifier.verify_token(token()) is not None
     assert jwks.fetches == 1
     assert warnings_in(caplog) == [
-        "key set entry 0 is a number, not an object; not used",
         "key set entry 1 has kid a list, not a string; no token can name it",
         "key set entry 2 (kid 'k2', kty 'RSA', alg a number) is unusable: PyJWKError; not used",
         "key set entry 3 (kid 'k3', kty null, alg 'RS256') is unusable: InvalidKeyError; not used",
         "key set entry 4 (kid 'k4', kty 'RSA', alg 'RS256') has use 'foo', not 'sig'; not used",
         "key set entry 5 (kid null, kty 'RSA', alg 'RS256') has no kid; not used",
+        "key set entry 0 is a number, not an object; not used",
     ]
 
 
@@ -748,6 +770,47 @@ async def test_unused_entries_are_logged_up_to_ten(
     assert warnings_in(caplog) == [
         *(f"key set entry {index} is a number, not an object; not used" for index in range(10)),
         "and 5 more key set entries not used",
+    ]
+
+
+UNUSABLE_K0 = {**without(GOOD_JWK, "kty"), "kid": "k0"}
+UNUSABLE_K0_LINE = "(kid 'k0', kty null, alg 'RS256') is unusable: InvalidKeyError; not used"
+
+
+@pytest.mark.anyio
+async def test_lines_about_objects_come_before_other_entries(
+    jwks: FakeJwks, caplog: pytest.LogCaptureFixture
+) -> None:
+    use_foo = {**GOOD_JWK, "use": "foo", "kid": "k4"}
+    jwks.answer = answer_json({"keys": [*range(12), UNUSABLE_K0, use_foo, GOOD_JWK, GOOD_JWK]})
+    with caplog.at_level(logging.WARNING, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(token()) is not None
+    assert warnings_in(caplog) == [
+        f"key set entry 12 {UNUSABLE_K0_LINE}",
+        "key set entry 13 (kid 'k4', kty 'RSA', alg 'RS256') has use 'foo', not 'sig'; not used",
+        "key set entry 15 repeats kid 'k1'; PyJWT uses the first",
+        *(f"key set entry {index} is a number, not an object; not used" for index in range(7)),
+        "and 5 more key set entries not used",
+    ]
+
+
+@pytest.mark.anyio
+async def test_debug_lines_never_take_the_place_of_a_warning(
+    jwks: FakeJwks, caplog: pytest.LogCaptureFixture
+) -> None:
+    encryption_keys = [{**ENC_JWK, "kid": f"e{index}"} for index in range(12)]
+    jwks.answer = answer_json({"keys": [*encryption_keys, UNUSABLE_K0, GOOD_JWK]})
+    with caplog.at_level(logging.DEBUG, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(token()) is not None
+    about = "(kid 'e{0}', kty 'RSA', alg 'RSA-OAEP-256') is an encryption key"
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.WARNING, f"key set entry 12 {UNUSABLE_K0_LINE}"),
+        *(
+            (logging.DEBUG, f"key set entry {index} {about.format(index)}; not used")
+            for index in range(10)
+        ),
+        (logging.DEBUG, "and 2 more key set entries not used"),
+        (logging.INFO, f"loaded the key set from {jwks.url}; signing keys 'k1'"),
     ]
 
 
@@ -854,7 +917,7 @@ def test_the_signing_keys_are_the_ones_pyjwt_picks(kty: str, member: str, value:
     # Served from the cache just filled, without a fetch.
     pyjwt_keys = client.get_signing_keys()
     entries = cast("list[object]", document["keys"])
-    kids, _notes = review(entries)
+    kids, _unusable, _notes = review(entries)
     assert list(kids) == [key.key_id for key in pyjwt_keys]
     for kid in ("k0", "k1", "k9"):
         assert client.cached_key(kid) is client.match_kid(pyjwt_keys, kid)
@@ -884,19 +947,21 @@ REFUSED = (
     + "or an oct key without k)"
 )
 NO_USABLE_KEYS = "PyJWKSetError: The JWK Set did not contain any usable keys."
+NOT_FOUND = "; check [auth] jwks_url, by default the issuer's path plus jwks/"
 
 # What the endpoint answers -> how the cause the warning names begins (its
 # type, plus PyJWT's message, but never Python's wording, which changes between
 # versions), and what the warning adds: the jwks_url hint when the endpoint
 # answered, but not with a usable key set; what PyJWT refused when one entry
-# fails the set; nothing for a connection error.
-FETCH_FAILURES: dict[str, tuple[Answer, str | tuple[str, ...], str]] = {
+# fails the set; where the path comes from for a 404; nothing for any other
+# connection error.
+FETCH_FAILURES: dict[str, tuple[Answer, str, str]] = {
     "not JSON": (answer_raw(b"<html>login</html>"), "JSONDecodeError: ", HINT),
     "not UTF-8": (answer_raw(b"\xff\xfe\x00"), "UnicodeDecodeError: ", HINT),
-    # Depending on the Python build, json runs out of stack or reports a syntax error.
+    # A closed document, so that nothing but the depth can fail it.
     "nested too deeply": (
-        answer_raw(b"[" * 100_000),
-        ("RecursionError: ", "JSONDecodeError: "),
+        answer_raw(b"[" * 100_000 + b"]" * 100_000),
+        "RecursionError: ",
         HINT,
     ),
     "not an object": (
@@ -933,11 +998,7 @@ FETCH_FAILURES: dict[str, tuple[Answer, str | tuple[str, ...], str]] = {
         "KeyError: 'k'",
         REFUSED,
     ),
-    "not found": (
-        answer_raw(b"", status=404),
-        CONNECTION_ERROR,
-        "",
-    ),
+    "not found": (answer_raw(b"", status=404), CONNECTION_ERROR, NOT_FOUND),
     "redirect": (
         answer_raw(b"", status=302),
         CONNECTION_ERROR,
@@ -955,7 +1016,7 @@ FETCH_FAILURES: dict[str, tuple[Answer, str | tuple[str, ...], str]] = {
 async def test_a_failed_fetch_rejects_the_token_with_one_warning(
     jwks: FakeJwks,
     answer: Answer,
-    cause: str | tuple[str, ...],
+    cause: str,
     explanation: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -964,13 +1025,11 @@ async def test_a_failed_fetch_rejects_the_token_with_one_warning(
     with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
         assert await make_verifier(jwks).verify_token(bearer) is None
     [warning] = warnings_in(caplog)
-    causes = (cause,) if isinstance(cause, str) else cause
-    assert warning.startswith(
-        tuple(f"cannot load the key set from {jwks.url}: {c}" for c in causes)
-    )
+    assert warning.startswith(f"cannot load the key set from {jwks.url}: {cause}")
     assert warning.count(jwks.url) == 1
     assert (HINT in warning) is (explanation == HINT)
     assert (REFUSED in warning) is (explanation == REFUSED)
+    assert (NOT_FOUND in warning) is (explanation == NOT_FOUND)
     assert warning.endswith(f"{explanation}; {ALL_REJECTED}; {NO_FETCH_FOR}")
     assert caplog.messages[-1] == REJECTED_UNFETCHED
     assert bearer not in caplog.text
@@ -1008,6 +1067,29 @@ async def test_an_unknown_kid_is_logged_at_info(
         "bearer token rejected: no signing key for kid 'k9'",
     ]
     assert warnings_in(caplog) == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "entry",
+    [UNUSABLE_K0, {**GOOD_JWK, "use": "foo", "kid": "k0"}, {**ENC_JWK, "kid": "k0"}],
+    ids=["unusable", "use foo", "encryption key"],
+)
+async def test_a_kid_whose_entry_is_not_used_says_so(
+    jwks: FakeJwks, entry: dict[str, object], caplog: pytest.LogCaptureFixture
+) -> None:
+    jwks.answer = answer_json({"keys": [entry, GOOD_JWK]})
+    verifier = make_verifier(jwks)
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        # The reason comes with every token that names the kid, not only the first.
+        for _ in range(2):
+            assert await verifier.verify_token(token(kid="k0")) is None
+        assert await verifier.verify_token(token(kid="k9")) is None
+    rejections = [m for m in caplog.messages if m.startswith("bearer token rejected")]
+    assert rejections == [
+        "bearer token rejected: no signing key for kid 'k0': "
+        + "the set names the kid, but its entry is unusable",
+    ] * 2 + ["bearer token rejected: no signing key for kid 'k9'"]
 
 
 @pytest.mark.anyio
