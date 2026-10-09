@@ -398,11 +398,11 @@ def test_a_refused_area_names_the_file_but_not_the_area(tmp_path: Path) -> None:
     path = _example_with(tmp_path, 'bob = "bob"\n', 'bob = ".secret"\n')
     with pytest.raises(ConfigError) as caught:
         load_config(path, env={})
-    assert str(caught.value) == f"[users] bob in {path} is not a single, visible directory name"
+    assert str(caught.value) == f"[users] 'bob' in {path} is not a single, visible directory name"
     path = _example_with(tmp_path, 'bob = "bob"\n', 'bob = "household"\n')
     with pytest.raises(ConfigError) as caught:
         load_config(path, env={})
-    assert str(caught.value) == f"[users] bob in {path} is the household area"
+    assert str(caught.value) == f"[users] 'bob' in {path} is the household area"
 
 
 @pytest.mark.parametrize(
@@ -522,4 +522,39 @@ def test_a_number_past_what_python_reads_is_too_large(
     shown = repr(value) if len(repr(value)) <= SHOWN_CHARS else repr(value)[:77] + "..."
     assert _refusal(raw_config(tmp_path), {env_name: value}) == (
         f"[{section}] {key} from {env_name} {message}, got {shown}"
+    )
+
+
+def test_a_missing_setting_names_its_origin(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_config(EXAMPLE, env={"MEMEX_SERVER_PUBLIC_URL": "", "MEMEX_AUTH_CLIENT_IDS": ","})
+    assert str(caught.value) == (
+        "missing required settings: [server] public_url from MEMEX_SERVER_PUBLIC_URL, "
+        "[auth] client_ids from MEMEX_AUTH_CLIENT_IDS"
+    )
+    path = _example_with(tmp_path, 'path = "/data/clone"\n', "")
+    with pytest.raises(ConfigError) as caught:
+        load_config(path, env={})
+    assert str(caught.value) == f"missing required settings: [repo] path in {path}"
+
+
+def test_key_names_are_escaped_and_cut(tmp_path: Path) -> None:
+    key = "x\x1b[2J" * 30
+    shown = repr(key)[: SHOWN_CHARS - 3] + "..."
+    raw = raw_config(tmp_path)
+    raw["server"][key] = 1
+    assert _refusal(raw) == f"[server] has unknown keys: {shown}"
+    raw = raw_config(tmp_path)
+    raw[key] = {}
+    assert _refusal(raw) == f"unknown sections: {shown}"
+    raw = raw_config(tmp_path)
+    raw["users"] = {"al\x1b[31mice": "household"}
+    assert _refusal(raw) == r"[users] 'al\x1b[31mice' is the household area"
+
+
+def test_a_household_clash_names_the_variable_that_set_the_area() -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_config(EXAMPLE, env={"MEMEX_RIGHTS_HOUSEHOLD_AREA": "alice"})
+    assert str(caught.value) == (
+        f"[users] 'alice' in {EXAMPLE} is the household area set by MEMEX_RIGHTS_HOUSEHOLD_AREA"
     )

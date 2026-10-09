@@ -193,8 +193,8 @@ class _Origins:
     """Where the settings came from, for refusals that name a setting.
 
     A refusal names the setting with the environment variable that set it, or
-    with the config file; a setting nobody set has its default, which no check
-    refuses.
+    else with the config file: where it is set, or where a required setting
+    nobody set is missing.
     """
 
     env: Mapping[str, str]
@@ -217,6 +217,11 @@ def _shown(value: object) -> str:
     except ValueError:  # an int past the digit limit of str(), alone or in a list
         return f"<{type(value).__name__} too long to show>"
     return text if len(text) <= SHOWN_CHARS else text[: SHOWN_CHARS - 3] + "..."
+
+
+def _key(name: object) -> str:
+    """A key name from the file for a refusal, escaped and cut like a value."""
+    return _shown(str(name))
 
 
 def _coerce_bool(where: str, value: object) -> bool:
@@ -305,7 +310,7 @@ def _section[S: DataclassInstance](
     unknown = set(table) - known
     if unknown:
         where = origins.in_file(f"[{name}]")
-        raise ConfigError(f"{where} has unknown keys: {', '.join(sorted(unknown))}")
+        raise ConfigError(f"{where} has unknown keys: {', '.join(map(_key, sorted(unknown)))}")
     values: dict[str, object] = {}
     for f in fields(defaults):
         default = cast("object", getattr(defaults, f.name))
@@ -330,7 +335,7 @@ def _users(raw: Mapping[str, object], origins: _Origins) -> dict[str, str]:
         raise ConfigError(f"{where} must map usernames to area directories")
     users: dict[str, str] = {}
     for username, area in cast("dict[object, object]", users_raw).items():
-        where = origins.in_file(f"[users] {username}")
+        where = origins.in_file(f"[users] {_key(username)}")
         if not isinstance(area, str):
             raise ConfigError(f"{where} must be a string")
         _check_area_name(area, where)
@@ -349,7 +354,7 @@ def build_config(
     unknown = set(raw) - _SECTIONS
     if unknown:
         where = origins.in_file("unknown sections")
-        raise ConfigError(f"{where}: {', '.join(sorted(unknown))}")
+        raise ConfigError(f"{where}: {', '.join(map(_key, sorted(unknown)))}")
     config = Config(
         server=_section("server", ServerConfig(), raw, origins),
         auth=_section("auth", AuthConfig(), raw, origins),
@@ -418,17 +423,16 @@ def _check_urls(config: Config, origins: _Origins) -> None:
 
 def _validate(config: Config, origins: _Origins) -> None:
     missing = [
-        name
-        for name, value in (
-            ("[server] public_url", config.server.public_url),
-            ("[auth] issuer", config.auth.issuer),
-            ("[repo] path", config.repo.path),
-            ("[index] path", config.index.path),
+        origins.where(section, key)
+        for section, key, value in (
+            ("server", "public_url", config.server.public_url),
+            ("auth", "issuer", config.auth.issuer),
+            ("auth", "client_ids", config.auth.client_ids),
+            ("repo", "path", config.repo.path),
+            ("index", "path", config.index.path),
         )
         if not value
     ]
-    if not config.auth.client_ids:
-        missing.append("[auth] client_ids")
     if missing:
         raise ConfigError(f"missing required settings: {', '.join(missing)}")
     _check_urls(config, origins)
@@ -440,12 +444,14 @@ def _validate(config: Config, origins: _Origins) -> None:
         raise ConfigError(f"{where} must be a logging level such as INFO or DEBUG")
     household = config.rights.household_area
     _check_area_name(household, origins.where("rights", "household_area"))
+    household_env = _env_name("rights", "household_area")
+    set_by = f" set by {household_env}" if household_env in origins.env else ""
     for username, area in config.users.items():
         # A personal area named like the shared one would hand the shared area
         # to that user without the household group.
         if area == household:
-            where = origins.in_file(f"[users] {username}")
-            raise ConfigError(f"{where} is the household area")
+            where = origins.in_file(f"[users] {_key(username)}")
+            raise ConfigError(f"{where} is the household area{set_by}")
 
 
 def load_config(path: str | Path | None = None, env: Mapping[str, str] | None = None) -> Config:
