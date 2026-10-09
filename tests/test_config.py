@@ -558,3 +558,22 @@ def test_a_household_clash_names_the_variable_that_set_the_area() -> None:
     assert str(caught.value) == (
         f"[users] 'alice' in {EXAMPLE} is the household area set by MEMEX_RIGHTS_HOUSEHOLD_AREA"
     )
+
+
+@pytest.mark.parametrize(
+    ("content", "problem"),
+    [
+        ("# M\xfcller s3cret\n".encode("latin-1"), "is not UTF-8: invalid byte at offset 3"),
+        (f"port = 1{'9' * 5000}\n".encode(), "is not valid TOML: a value is out of range"),
+        (f"a = {'[' * 5000}{']' * 5000}\n".encode(), "is not valid TOML: nested too deeply"),
+    ],
+    ids=["not utf-8", "digit limit", "deep nesting"],
+)
+def test_a_file_tomllib_cannot_decode_is_refused(
+    tmp_path: Path, content: bytes, problem: str
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_bytes(content)
+    with pytest.raises(ConfigError) as caught:
+        load_config(path, env={})
+    assert str(caught.value) == f"config {path} {problem}"

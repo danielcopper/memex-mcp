@@ -467,4 +467,14 @@ def load_config(path: str | Path | None = None, env: Mapping[str, str] | None = 
         raise ConfigError(f"cannot read config {chosen}: {exc.strerror}") from None
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"config {chosen} is not valid TOML: {exc}") from None
+    # tomllib decodes the bytes itself and lets these through; none of the
+    # messages quotes the file's content.
+    except UnicodeDecodeError as exc:
+        raise ConfigError(
+            f"config {chosen} is not UTF-8: invalid byte at offset {exc.start}"
+        ) from None
+    except ValueError:  # an integer past the digit limit of int()
+        raise ConfigError(f"config {chosen} is not valid TOML: a value is out of range") from None
+    except RecursionError:
+        raise ConfigError(f"config {chosen} is not valid TOML: nested too deeply") from None
     return build_config(raw, env, chosen)
