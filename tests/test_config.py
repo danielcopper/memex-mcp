@@ -849,3 +849,19 @@ def test_an_area_name_with_whitespace_or_control_characters_is_refused(
     raw = raw_config(tmp_path)
     raw["users"] = {"eve": area}
     assert _refusal(raw) == "[users] 'eve' contains whitespace or control characters"
+
+
+@pytest.mark.parametrize("value", ["-1e999", "-" + "9" * 400])
+def test_a_string_that_reads_as_negative_infinity_is_not_finite(tmp_path: Path, value: str) -> None:
+    message = _refusal(raw_config(tmp_path), {"MEMEX_AUTH_TIMEOUT_SECONDS": value})
+    assert message.startswith(
+        "[auth] timeout_seconds from MEMEX_AUTH_TIMEOUT_SECONDS must be a finite number, got "
+    )
+
+
+def test_a_file_with_a_byte_order_mark_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_bytes(b"\xef\xbb\xbf" + EXAMPLE.read_bytes())
+    with pytest.raises(ConfigError) as caught:
+        load_config(path, env={})
+    assert str(caught.value) == f"config {path} starts with a byte-order mark; save it without one"

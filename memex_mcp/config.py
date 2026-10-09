@@ -8,6 +8,7 @@ secrets and URLs need not live in the file. The identity-to-area mapping
 
 from __future__ import annotations
 
+import codecs
 import logging
 import math
 import os
@@ -295,9 +296,10 @@ def _coerce_float(where: str, value: object) -> float:
     else:
         if math.isfinite(number):
             return number
-        # float() reads a string of digits past the float range as infinity.
-        spelled = not isinstance(value, str) or "inf" in value.lower()
-        problem = "must be a finite number" if math.isnan(number) or spelled else "is too large"
+        # float() reads a string of digits past the float range as infinity;
+        # only a positive one of those is too large, the rest is not finite.
+        too_large = isinstance(value, str) and "inf" not in value.lower() and number > 0
+        problem = "is too large" if too_large else "must be a finite number"
     raise ConfigError(f"{where} {problem}, got {_shown(value)}")
 
 
@@ -583,21 +585,14 @@ def _validate(config: Config, origins: _Origins) -> None:
             raise ConfigError(f"{where} is the household area{set_by}")
 
 
-def load_config(path: str | Path | None = None, env: Mapping[str, str] | None = None) -> Config:
-    """Load the config file named by ``path`` or ``MEMEX_CONFIG``."""
-    env = os.environ if env is None else env
-    chosen = path if path is not None else env.get(CONFIG_ENV)
-    if not chosen:
-        raise ConfigError(f"no config file given (set {CONFIG_ENV} or pass --config)")
+def _parse_toml(chosen: str | Path, data: bytes) -> dict[str, object]:
+    if data.startswith(codecs.BOM_UTF8):
+        raise ConfigError(f"config {chosen} starts with a byte-order mark; save it without one")
+    # None of the messages quotes the file's content.
     try:
-        with Path(chosen).open("rb") as handle:
-            raw = tomllib.load(handle)
-    except OSError as exc:
-        raise ConfigError(f"cannot read config {chosen}: {exc.strerror}") from None
+        return tomllib.loads(data.decode("utf-8"))
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"config {chosen} is not valid TOML: {exc}") from None
-    # tomllib decodes the bytes itself and lets these through; none of the
-    # messages quotes the file's content.
     except UnicodeDecodeError as exc:
         raise ConfigError(
             f"config {chosen} is not UTF-8: invalid byte at offset {exc.start}"
@@ -606,4 +601,16 @@ def load_config(path: str | Path | None = None, env: Mapping[str, str] | None = 
         raise ConfigError(f"config {chosen} is not valid TOML: a value is out of range") from None
     except RecursionError:
         raise ConfigError(f"config {chosen} is not valid TOML: nested too deeply") from None
-    return build_config(raw, env, chosen)
+
+
+def load_config(path: str | Path | None = None, env: Mapping[str, str] | None = None) -> Config:
+    """Load the config file named by ``path`` or ``MEMEX_CONFIG``."""
+    env = os.environ if env is None else env
+    chosen = path if path is not None else env.get(CONFIG_ENV)
+    if not chosen:
+        raise ConfigError(f"no config file given (set {CONFIG_ENV} or pass --config)")
+    try:
+        data = Path(chosen).read_bytes()
+    except OSError as exc:
+        raise ConfigError(f"cannot read config {chosen}: {exc.strerror}") from None
+    return build_config(_parse_toml(chosen, data), env, chosen)
