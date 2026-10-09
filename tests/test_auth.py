@@ -18,7 +18,7 @@ from base64 import urlsafe_b64encode
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import TracebackType
-from typing import Self, TypedDict, cast, override
+from typing import Self, TypedDict, TypeGuard, cast, override
 
 import anyio
 import jwt
@@ -929,7 +929,7 @@ def test_the_signing_keys_are_the_ones_pyjwt_picks(kty: str, member: str, value:
 CACHE_ATTRIBUTES = frozenset({"jwk_set_cache", "jwk_set_with_timestamp"})
 
 
-def assigns_none_to_the_cache(node: ast.AST) -> bool:
+def assigns_none_to_the_cache(node: ast.AST) -> TypeGuard[ast.Assign | ast.AnnAssign]:
     if isinstance(node, ast.Assign):
         targets, value = node.targets, node.value
     elif isinstance(node, ast.AnnAssign):
@@ -943,45 +943,69 @@ def assigns_none_to_the_cache(node: ast.AST) -> bool:
     )
 
 
+Clearing = ast.Assign | ast.AnnAssign
+
+
+def cache_clearings(tree: ast.Module) -> dict[str, list[Clearing]]:
+    """Every assignment of None to the cache in ``tree``, by the name of the method it is in."""
+    found: dict[str, list[Clearing]] = {}
+    for method in ast.walk(tree):
+        if isinstance(method, ast.FunctionDef):
+            nodes = [node for node in ast.walk(method) if assigns_none_to_the_cache(node)]
+            if nodes:
+                found.setdefault(method.name, []).extend(nodes)
+    return found
+
+
+def shown(found: dict[str, list[Clearing]]) -> dict[str, list[str]]:
+    return {name: [ast.unparse(node) for node in nodes] for name, nodes in found.items()}
+
+
 def test_pyjwt_never_clears_the_cached_key_set() -> None:
     """The cache is read without the lock, which holds while PyJWT only replaces the set.
 
     Clearing it would empty the cache while a fetch runs, and a failed fetch would
     drop a set that is still valid; this fails on a pin bump that adds either.
 
-    It sees, in ``jwt/jwks_client.py``, the first argument of every ``.put(`` call
-    and every assignment of None to an attribute named ``jwk_set_cache`` or
-    ``jwk_set_with_timestamp`` outside ``__init__``. It does not see None passed
-    through a variable, ``setattr`` or ``del``, other methods of the cache, or code
-    in any other module.
+    It sees, in ``jwt/jwks_client.py``, the first argument of every ``.put(`` call,
+    and in that file and ``jwt/jwk_set_cache.py`` every assignment of None to an
+    attribute named ``jwk_set_cache`` or ``jwk_set_with_timestamp``: only
+    ``__init__`` and the None branch of ``JWKSetCache.put`` may make one. It does
+    not see None passed through a variable, ``setattr`` or ``del``, a change inside
+    the timestamped set, or code in any other module.
     """
-    tree = ast.parse(inspect.getsource(jwt.jwks_client))
+    client = ast.parse(inspect.getsource(jwt.jwks_client))
     puts = [
         node
-        for node in ast.walk(tree)
+        for node in ast.walk(client)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "put"
     ]
     assert puts  # the check below would hold for no call at all
     assert [ast.unparse(node.args[0]) for node in puts] == ["jwk_set"] * len(puts)
-    methods = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
-    in_init = [
-        node
-        for method in methods
-        if method.name == "__init__"
-        for node in ast.walk(method)
-        if assigns_none_to_the_cache(node)
-    ]
+
+    by_client = cache_clearings(client)
     # __init__ starts without a cache, in both forms: the match sees each.
-    assert {type(node) for node in in_init} == {ast.Assign, ast.AnnAssign}
-    assert [
-        ast.unparse(node)
-        for method in methods
-        if method.name != "__init__"
-        for node in ast.walk(method)
-        if assigns_none_to_the_cache(node)
-    ] == []
+    assert {type(node) for node in by_client.pop("__init__", [])} == {ast.Assign, ast.AnnAssign}
+    assert shown(by_client) == {}
+
+    cache = ast.parse(inspect.getsource(jwt.jwk_set_cache))
+    by_cache = cache_clearings(cache)
+    assert {type(node) for node in by_cache.pop("__init__", [])} == {ast.AnnAssign}
+    in_put = by_cache.pop("put", [])
+    assert shown(by_cache) == {}
+    # put(None) is how the cache clears itself on request; jwks_client.py never asks.
+    branches = [
+        node
+        for node in ast.walk(cache)
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "jwk_set is None"
+    ]
+    in_branch = [
+        node for branch in branches for node in ast.walk(branch) if assigns_none_to_the_cache(node)
+    ]
+    assert in_branch  # the match sees put's own clearing
+    assert [node.lineno for node in in_put] == [node.lineno for node in in_branch]
 
 
 HINT = "; is [auth] jwks_url the provider's JWKS endpoint?"
@@ -1166,6 +1190,16 @@ async def test_a_kid_whose_entry_is_not_used_says_so(
     assert rejections == [f"{NOT_USED} {why}"] * 2 + [
         "bearer token rejected: no signing key for kid 'k9'"
     ]
+
+
+@pytest.mark.anyio
+async def test_of_several_unused_entries_for_a_kid_the_first_gives_the_reason(
+    jwks: FakeJwks, caplog: pytest.LogCaptureFixture
+) -> None:
+    jwks.answer = answer_json({"keys": [ENC_K0, USE_FOO_K0, UNUSABLE_K0, GOOD_JWK]})
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(token(kid="k0")) is None
+    assert caplog.messages[-1] == f"{NOT_USED} is an encryption key"
 
 
 @pytest.mark.anyio
