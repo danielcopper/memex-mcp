@@ -2,7 +2,8 @@
 # environment variable MEMEX_<SECTION>_<KEY>, e.g. MEMEX_REPO_REMOTE or
 # MEMEX_AUTH_CLIENT_IDS (comma-separated). All values below are examples.
 # Each number setting states its range below; one marked as a whole number
-# takes no decimal point, the others may have one.
+# takes no decimal point, the others may have one. Numbers and booleans go
+# without quotes here; only an environment variable gives them as text.
 
 [server]
 host = "0.0.0.0"
@@ -22,20 +23,22 @@ issuer = "https://auth.example.org/application/o/memex/"
 # jwks_url = "https://auth.example.org/application/o/memex/jwks/"
 # Client ids whose access tokens are accepted (checked against aud and azp).
 client_ids = ["memex-claude-code"]
+# At least one, and only asymmetric ones (RS*, PS*, ES*, EdDSA).
 algorithms = ["RS256", "ES256"]
 scopes = ["openid", "profile", "offline_access"]
-# Whole seconds, at least 0.
+# Whole seconds, 0 to 86400.
 leeway_seconds = 30
 # A token naming a key the cached key set lacks fetches the set again, but not
 # sooner than this after the last successful fetch, and a failed fetch is not
 # tried again for this long (nor sooner than timeout_seconds); the set itself
-# is fetched again on the first request after five minutes. Whole seconds, at
-# least 0.
+# is fetched again on the first request after five minutes. Whole seconds, 0
+# to 86400.
 jwks_min_refetch_seconds = 60
-# Greater than 0.
+# 0.1 to 86400.
 timeout_seconds = 5.0
 
 [rights]
+# None of these may be empty.
 access_group = "memex"
 household_group = "household"
 household_area = "household"
@@ -45,35 +48,37 @@ path = "/data/clone"
 # Cloned from here if path holds no clone yet. A URL with a credential belongs
 # in MEMEX_REPO_REMOTE, not in this file.
 remote = "https://git.example.org/alice/memex.git"
+# Not empty, and not starting with "-".
 branch = "main"
-# At least 1.
+# 1 to 86400.
 fetch_interval_seconds = 60
-# Greater than 0.
+# 0.1 to 86400.
 git_timeout_seconds = 60
 
 [index]
 path = "/data/index/memex.sqlite3"
 # Greater than 0, at most 1.
 archive_factor = 0.5
-# Whole numbers: snippet_chars at least 40, chunk_chars at least 100,
-# max_limit at least 1.
+# Whole numbers up to 2147483647: snippet_chars at least 40, chunk_chars at
+# least 100, max_limit at least 1.
 snippet_chars = 300
 chunk_chars = 1500
 max_limit = 50
 
 [embeddings]
 enabled = true
-# http or https; checked only while enabled.
+# url and model are required while enabled, and only then checked; url takes
+# http or https.
 url = "http://ollama.example.org:11434"
 model = "bge-m3"
-# Whole number, at least 1.
+# Whole number, 1 to 2147483647.
 dimensions = 1024
-# Both timeouts greater than 0.
+# Both timeouts 0.1 to 86400.
 query_timeout_seconds = 3.0
 index_timeout_seconds = 120.0
-# At least 0.
+# 0 to 86400.
 retry_after_seconds = 60.0
-# Whole number, at least 1.
+# Whole number, 1 to 2147483647.
 batch_size = 32
 
 # Authentik username (preferred_username) -> the user's own area directory.
