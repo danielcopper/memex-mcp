@@ -15,6 +15,11 @@ from tests.conftest import raw_config
 EXAMPLE = Path(__file__).resolve().parent.parent / "config.example.toml"
 
 
+def _env(section: str, key: str) -> str:
+    """The environment variable that sets ``[section] key``."""
+    return f"MEMEX_{section.upper()}_{key.upper()}"
+
+
 def test_example_config_loads() -> None:
     config = load_config(EXAMPLE, env={})
     assert config.auth.client_ids == ("memex-claude-code",)
@@ -165,7 +170,7 @@ def test_a_boolean_is_not_a_number(tmp_path: Path, section: str, key: str, messa
     raw = raw_config(tmp_path)
     raw[section][key] = True
     assert _refusal(raw) == f"[{section}] {key} {message}, got True"
-    env_name = f"MEMEX_{section.upper()}_{key.upper()}"
+    env_name = _env(section, key)
     assert _refusal(raw_config(tmp_path), {env_name: "true"}) == (
         f"[{section}] {key} from {env_name} {message}, got 'true'"
     )
@@ -282,7 +287,7 @@ def test_a_number_setting_must_be_finite(
 ) -> None:
     raw = raw_config(tmp_path)
     if isinstance(value, str):
-        env_name = f"MEMEX_{section.upper()}_{key.upper()}"
+        env_name = _env(section, key)
         where = f"[{section}] {key} from {env_name}"
         message = _refusal(raw, {env_name: value})
     else:
@@ -378,7 +383,7 @@ def test_the_embeddings_url_is_checked_while_enabled(
     ],
 )
 def test_a_refused_url_is_never_shown(tmp_path: Path, section: str, key: str, url: str) -> None:
-    env_name = f"MEMEX_{section.upper()}_{key.upper()}"
+    env_name = _env(section, key)
     for message in (
         _refusal({**raw_config(tmp_path), section: {**raw_config(tmp_path)[section], key: url}}),
         _refusal(raw_config(tmp_path), {env_name: url}),
@@ -458,7 +463,7 @@ def _url_refusal(tmp_path: Path, section: str, key: str, url: str, *, env: bool)
     raw = raw_config(tmp_path)
     environment: dict[str, str] = {}
     if env:
-        environment[f"MEMEX_{section.upper()}_{key.upper()}"] = url
+        environment[_env(section, key)] = url
     else:
         raw[section][key] = url
     with pytest.raises(ConfigError) as caught:
@@ -548,8 +553,10 @@ def test_a_value_too_long_to_show_is_described(
 def test_a_number_past_what_python_reads_is_too_large(
     tmp_path: Path, section: str, key: str, value: str, message: str
 ) -> None:
-    env_name = f"MEMEX_{section.upper()}_{key.upper()}"
-    shown = repr(value) if len(repr(value)) <= SHOWN_CHARS else repr(value)[:77] + "..."
+    env_name = _env(section, key)
+    shown = (
+        repr(value) if len(repr(value)) <= SHOWN_CHARS else repr(value)[: SHOWN_CHARS - 3] + "..."
+    )
     assert _refusal(raw_config(tmp_path), {env_name: value}) == (
         f"[{section}] {key} from {env_name} {message}, got {shown}"
     )
@@ -630,7 +637,7 @@ def test_a_quoted_number_or_boolean_comes_only_from_the_environment(
     raw = raw_config(tmp_path)
     raw[section][key] = value
     assert _refusal(raw) == f"[{section}] {key} must be {kind} without quotes, got {value!r}"
-    env_name = f"MEMEX_{section.upper()}_{key.upper()}"
+    env_name = _env(section, key)
     assert _settings(build_config(raw_config(tmp_path), {env_name: value}))[section][key] == read
 
 
@@ -647,7 +654,7 @@ def test_a_quoted_number_or_boolean_comes_only_from_the_environment(
 def test_an_empty_setting_the_server_needs_is_missing(
     tmp_path: Path, section: str, key: str
 ) -> None:
-    env_name = f"MEMEX_{section.upper()}_{key.upper()}"
+    env_name = _env(section, key)
     message = _refusal(raw_config(tmp_path), {env_name: ""})
     assert message == f"missing required settings: [{section}] {key} from {env_name}"
     raw = raw_config(tmp_path)
@@ -704,7 +711,7 @@ def test_every_setting_reads_its_environment_variable(tmp_path: Path) -> None:
         if section == "users":
             continue
         for key, value in values.items():
-            env = {f"MEMEX_{section.upper()}_{key.upper()}": _as_env_text(value)}
+            env = {_env(section, key): _as_env_text(value)}
             assert _settings(build_config(raw_config(tmp_path), env)) == built
 
 
@@ -846,7 +853,7 @@ def test_a_name_git_or_the_file_system_takes_as_given_is_refused(
     raw = raw_config(tmp_path)
     raw[section][key] = value
     assert _refusal(raw) == f"[{section}] {key} contains whitespace or control characters"
-    env_name = f"MEMEX_{section.upper()}_{key.upper()}"
+    env_name = _env(section, key)
     assert _refusal(raw_config(tmp_path), {env_name: value}) == (
         f"[{section}] {key} from {env_name} contains whitespace or control characters"
     )
