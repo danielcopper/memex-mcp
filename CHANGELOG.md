@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/danielcopper/memex-mcp/compare/v0.1.1...v0.1.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* let cached jwks signing keys expire so revoked keys stop verifying ([#10](https://github.com/danielcopper/memex-mcp/issues/10)) ([441d3a1](https://github.com/danielcopper/memex-mcp/commit/441d3a1d00eb6b8e644c3313c257d202e90f6d28))
+
 ## [0.1.1](https://github.com/danielcopper/memex-mcp/compare/v0.1.0...v0.1.1) (2026-10-08)
 
 
