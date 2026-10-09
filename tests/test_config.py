@@ -190,22 +190,44 @@ def test_whole_numbers_come_from_the_file_or_the_environment(tmp_path: Path) -> 
 
 # Each number setting: values just inside its bound, values just outside it,
 # and how the refusal words the bound.
+SECONDS = "at most 86400"
+WHOLE = "at most 2147483647"
 BOUNDS: dict[tuple[str, str], tuple[list[float], list[float], str]] = {
     ("server", "port"): ([1, 65535], [0, 65536], "at least 1 and at most 65535"),
-    ("auth", "leeway_seconds"): ([0], [-1], "at least 0"),
-    ("auth", "jwks_min_refetch_seconds"): ([0], [-1], "at least 0"),
-    ("auth", "timeout_seconds"): ([0.001], [0, -0.001], "greater than 0"),
-    ("repo", "fetch_interval_seconds"): ([1], [0.999, 0], "at least 1"),
-    ("repo", "git_timeout_seconds"): ([0.001], [0, -0.001], "greater than 0"),
+    ("auth", "leeway_seconds"): ([0, 86400], [-1, 86401], f"at least 0 and {SECONDS}"),
+    ("auth", "jwks_min_refetch_seconds"): ([0, 86400], [-1, 86401], f"at least 0 and {SECONDS}"),
+    ("auth", "timeout_seconds"): ([0.1, 86400], [0.099, 86400.001], f"at least 0.1 and {SECONDS}"),
+    ("repo", "fetch_interval_seconds"): (
+        [1, 86400],
+        [0.999, 86400.001],
+        f"at least 1 and {SECONDS}",
+    ),
+    ("repo", "git_timeout_seconds"): (
+        [0.1, 86400],
+        [0.099, 86400.001],
+        f"at least 0.1 and {SECONDS}",
+    ),
     ("index", "archive_factor"): ([0.001, 1], [0, 1.001], "greater than 0 and at most 1"),
-    ("index", "snippet_chars"): ([40], [39], "at least 40"),
-    ("index", "chunk_chars"): ([100], [99], "at least 100"),
-    ("index", "max_limit"): ([1], [0], "at least 1"),
-    ("embeddings", "dimensions"): ([1], [0], "at least 1"),
-    ("embeddings", "query_timeout_seconds"): ([0.001], [0, -0.001], "greater than 0"),
-    ("embeddings", "index_timeout_seconds"): ([0.001], [0, -0.001], "greater than 0"),
-    ("embeddings", "retry_after_seconds"): ([0], [-0.001], "at least 0"),
-    ("embeddings", "batch_size"): ([1], [0], "at least 1"),
+    ("index", "snippet_chars"): ([40, 2**31 - 1], [39, 2**31], f"at least 40 and {WHOLE}"),
+    ("index", "chunk_chars"): ([100, 2**31 - 1], [99, 2**31], f"at least 100 and {WHOLE}"),
+    ("index", "max_limit"): ([1, 2**31 - 1], [0, 2**31], f"at least 1 and {WHOLE}"),
+    ("embeddings", "dimensions"): ([1, 2**31 - 1], [0, 2**31], f"at least 1 and {WHOLE}"),
+    ("embeddings", "query_timeout_seconds"): (
+        [0.1, 86400],
+        [0.099, 86400.001],
+        f"at least 0.1 and {SECONDS}",
+    ),
+    ("embeddings", "index_timeout_seconds"): (
+        [0.1, 86400],
+        [0.099, 86400.001],
+        f"at least 0.1 and {SECONDS}",
+    ),
+    ("embeddings", "retry_after_seconds"): (
+        [0, 86400],
+        [-0.001, 86400.001],
+        f"at least 0 and {SECONDS}",
+    ),
+    ("embeddings", "batch_size"): ([1, 2**31 - 1], [0, 2**31], f"at least 1 and {WHOLE}"),
 }
 
 

@@ -30,6 +30,13 @@ CONFIG_ENV = "MEMEX_CONFIG"
 MIN_SNIPPET_CHARS = 40
 # The smallest chunk_chars; at 0 the chunker would never end.
 MIN_CHUNK_CHARS = 100
+# The longest any seconds setting may be: one day.
+MAX_SECONDS = 86400
+# The shortest any timeout may be.
+MIN_TIMEOUT_SECONDS = 0.1
+# The largest chunk_chars, snippet_chars, max_limit, dimensions and batch_size:
+# the largest signed 32-bit integer.
+MAX_WHOLE = 2**31 - 1
 # A refusal shows a given number or boolean value, escaped and cut to this length.
 SHOWN_CHARS = 80
 
@@ -141,9 +148,9 @@ _SECTIONS = frozenset(f.name for f in fields(Config))
 class _Bound:
     """The range a number setting must lie in."""
 
-    low: int
+    low: float
     above: bool = False  # the value must be greater than `low`, not equal to it
-    high: int | None = None
+    high: float | None = None
 
     def holds(self, number: float) -> bool:
         if number < self.low or (self.above and number == self.low):
@@ -161,20 +168,20 @@ class _Bound:
 # call.
 _BOUNDS: Mapping[tuple[str, str], _Bound] = {
     ("server", "port"): _Bound(1, high=65535),
-    ("auth", "leeway_seconds"): _Bound(0),
-    ("auth", "jwks_min_refetch_seconds"): _Bound(0),
-    ("auth", "timeout_seconds"): _Bound(0, above=True),
-    ("repo", "fetch_interval_seconds"): _Bound(1),
-    ("repo", "git_timeout_seconds"): _Bound(0, above=True),
+    ("auth", "leeway_seconds"): _Bound(0, high=MAX_SECONDS),
+    ("auth", "jwks_min_refetch_seconds"): _Bound(0, high=MAX_SECONDS),
+    ("auth", "timeout_seconds"): _Bound(MIN_TIMEOUT_SECONDS, high=MAX_SECONDS),
+    ("repo", "fetch_interval_seconds"): _Bound(1, high=MAX_SECONDS),
+    ("repo", "git_timeout_seconds"): _Bound(MIN_TIMEOUT_SECONDS, high=MAX_SECONDS),
     ("index", "archive_factor"): _Bound(0, above=True, high=1),
-    ("index", "snippet_chars"): _Bound(MIN_SNIPPET_CHARS),
-    ("index", "chunk_chars"): _Bound(MIN_CHUNK_CHARS),
-    ("index", "max_limit"): _Bound(1),
-    ("embeddings", "dimensions"): _Bound(1),
-    ("embeddings", "query_timeout_seconds"): _Bound(0, above=True),
-    ("embeddings", "index_timeout_seconds"): _Bound(0, above=True),
-    ("embeddings", "retry_after_seconds"): _Bound(0),
-    ("embeddings", "batch_size"): _Bound(1),
+    ("index", "snippet_chars"): _Bound(MIN_SNIPPET_CHARS, high=MAX_WHOLE),
+    ("index", "chunk_chars"): _Bound(MIN_CHUNK_CHARS, high=MAX_WHOLE),
+    ("index", "max_limit"): _Bound(1, high=MAX_WHOLE),
+    ("embeddings", "dimensions"): _Bound(1, high=MAX_WHOLE),
+    ("embeddings", "query_timeout_seconds"): _Bound(MIN_TIMEOUT_SECONDS, high=MAX_SECONDS),
+    ("embeddings", "index_timeout_seconds"): _Bound(MIN_TIMEOUT_SECONDS, high=MAX_SECONDS),
+    ("embeddings", "retry_after_seconds"): _Bound(0, high=MAX_SECONDS),
+    ("embeddings", "batch_size"): _Bound(1, high=MAX_WHOLE),
 }
 
 # What int() reads as a decimal whole number; it refuses one only past its
