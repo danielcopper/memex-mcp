@@ -1,12 +1,12 @@
 # memex-mcp configuration. Every scalar or list setting can be overridden by an
 # environment variable MEMEX_<SECTION>_<KEY>, e.g. MEMEX_REPO_REMOTE or
 # MEMEX_AUTH_CLIENT_IDS (comma-separated). All values below are examples.
-# Whole-number settings take no decimal point; "seconds" settings take any
-# finite number unless noted.
+# Each number setting states its range below; one marked as a whole number
+# takes no decimal point, the others may have one.
 
 [server]
 host = "0.0.0.0"
-# 1 to 65535.
+# A whole number, 1 to 65535.
 port = 8000
 # The URL clients use; the resource advertised to them is public_url + mcp_path.
 # https, or http to localhost, 127.0.0.1 or [::1]; the same holds for the

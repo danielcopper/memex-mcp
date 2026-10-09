@@ -156,8 +156,9 @@ class _Bound:
         return low if self.high is None else f"{low} and at most {self.high}"
 
 
-# Every number setting has a bound, so that a value the server cannot run with
-# refuses to start instead of hanging, busy-looping or failing every call.
+# Every number setting has a bound, so that the server refuses to start on a
+# value it cannot run with instead of hanging, busy-looping or failing every
+# call.
 _BOUNDS: Mapping[tuple[str, str], _Bound] = {
     ("server", "port"): _Bound(1, high=65535),
     ("auth", "leeway_seconds"): _Bound(0),
@@ -282,8 +283,10 @@ def _coerce(section: str, key: str, where: str, value: object, default: object) 
         return _coerce_bool(where, value)
     if isinstance(default, int | float):
         # TOML and the environment give strings, numbers, booleans, lists,
-        # tables and dates; a number setting takes a number or a string of one,
-        # never a boolean, though Python counts it as an int.
+        # tables and dates. A whole-number setting takes an integer or a string
+        # of one, never a float; any other number setting takes an integer, a
+        # float or a string of either. Neither takes a boolean, though Python
+        # counts it as an int.
         number = (
             _coerce_int(where, value) if isinstance(default, int) else _coerce_float(where, value)
         )
@@ -406,8 +409,9 @@ def _url_problem(url: str, *, https: bool) -> str | None:
 
 
 def _check_urls(config: Config, origins: _Origins) -> None:
-    # (section, key, value, whether it needs https); empty values are left to
-    # the check for missing settings, and a derived jwks_url follows the issuer.
+    # (section, key, value, whether it needs https); an empty value is not
+    # checked here (the required ones are refused as missing), and a derived
+    # jwks_url follows the issuer.
     urls = [
         ("server", "public_url", config.server.public_url, True),
         ("auth", "issuer", config.auth.issuer, True),
