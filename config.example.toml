@@ -20,6 +20,10 @@ client_ids = ["memex-claude-code"]
 algorithms = ["RS256", "ES256"]
 scopes = ["openid", "profile", "offline_access"]
 leeway_seconds = 30
+# A token naming a key the cached key set lacks fetches the set again, but not
+# sooner than this after the last successful fetch, and a failed fetch is not
+# tried again for this long (nor sooner than timeout_seconds); the set itself
+# is fetched again on the first request after five minutes.
 jwks_min_refetch_seconds = 60
 timeout_seconds = 5.0
 

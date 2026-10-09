@@ -19,6 +19,8 @@ from memex_mcp.embed import Embedder, EmbeddingError, OllamaEmbedder
 from memex_mcp.rights import Identity
 from memex_mcp.service import Memex
 
+PROXY_VARIABLES = frozenset({"http_proxy", "https_proxy", "all_proxy"})
+
 # Every area carries a note `memory/zebra.md` with this word, so one search
 # shows exactly which areas a caller reaches.
 MARKER = "zebracode"
@@ -26,7 +28,7 @@ MARKER = "zebracode"
 
 @pytest.fixture(scope="session", autouse=True)
 def isolated_home(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
-    """No test reads or writes the real HOME, and git sees no user or system config.
+    """No test reads or writes the real HOME, git sees no user or system config, and no proxy.
 
     Session-scoped so that it is in force before any other fixture runs.
     """
@@ -41,7 +43,8 @@ def isolated_home(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
         patch.setenv("GIT_COMMITTER_NAME", "Test Author")
         patch.setenv("GIT_COMMITTER_EMAIL", "author@example.org")
         for name in list(os.environ):
-            if name.startswith("MEMEX_"):
+            # urllib, which fetches the JWKS, reads the proxy variables in either case.
+            if name.startswith("MEMEX_") or name.lower() in PROXY_VARIABLES:
                 patch.delenv(name)
         yield home
 

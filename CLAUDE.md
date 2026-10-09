@@ -35,7 +35,8 @@ CI runs the same on Python 3.12 (the floor) and 3.14, and builds the container i
 - **A new guard gets a test that is seen failing**: break the guard on a copy of the tree, watch the test go red,
   restore. `tests/test_rights.py`, `tests/test_paths.py` and `tests/test_disclosure.py` are the rights tests.
 - **Tests never touch the network or the real HOME.** `tests/conftest.py` points HOME and git's global config at a
-  temporary directory for the whole session; origins are local bare repositories; JWKS and Ollama are mocked transports.
+  temporary directory for the whole session; origins are local bare repositories; the JWKS endpoint is a local HTTP
+  server on 127.0.0.1, Ollama a mocked transport.
 - Runtime dependencies are pinned exactly in `pyproject.toml` (this is an application), dev tools too.
 - Version 1 is read-only. Writing (a commit per write, push, generated index files) comes later; keep the service layer
   the one place that would grow it.

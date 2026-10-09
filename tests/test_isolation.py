@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import urllib.request
 from pathlib import Path
 
 
@@ -25,3 +26,8 @@ def test_git_sees_no_user_or_system_config(isolated_home: Path) -> None:
     assert all(str(isolated_home) in origin or "command line" in origin for origin in origins), (
         origins
     )
+
+
+def test_no_proxy_is_configured() -> None:
+    """The JWKS endpoint on 127.0.0.1 is reached directly, whatever the shell exports."""
+    assert urllib.request.getproxies() == {}
