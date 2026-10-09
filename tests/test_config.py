@@ -692,3 +692,36 @@ def test_every_setting_reads_its_environment_variable(tmp_path: Path) -> None:
         for key, value in values.items():
             env = {f"MEMEX_{section.upper()}_{key.upper()}": _as_env_text(value)}
             assert _settings(build_config(raw_config(tmp_path), env)) == built
+
+
+ALLOWED_ALGORITHMS = (
+    "ES256, ES256K, ES384, ES512, ES521, EdDSA, PS256, PS384, PS512, RS256, RS384, RS512"
+)
+
+
+@pytest.mark.parametrize("algorithms", [["RS256"], ["ES256", "PS512", "EdDSA"]])
+def test_asymmetric_algorithms_are_accepted(tmp_path: Path, algorithms: list[str]) -> None:
+    raw = raw_config(tmp_path)
+    raw["auth"]["algorithms"] = algorithms
+    assert build_config(raw, {}).auth.algorithms == tuple(algorithms)
+
+
+@pytest.mark.parametrize("algorithm", ["HS256", "none", "RS257", "rs256"])
+def test_an_algorithm_that_is_not_asymmetric_is_refused(tmp_path: Path, algorithm: str) -> None:
+    raw = raw_config(tmp_path)
+    raw["auth"]["algorithms"] = ["RS256", algorithm]
+    assert _refusal(raw) == (
+        f"[auth] algorithms has {algorithm!r}, not one of {ALLOWED_ALGORITHMS}"
+    )
+    message = _refusal(raw_config(tmp_path), {"MEMEX_AUTH_ALGORITHMS": f"RS256,{algorithm}"})
+    assert message.startswith(f"[auth] algorithms from MEMEX_AUTH_ALGORITHMS has {algorithm!r}")
+
+
+@pytest.mark.parametrize("value", ["", ","])
+def test_no_algorithm_is_missing(tmp_path: Path, value: str) -> None:
+    assert _refusal(raw_config(tmp_path), {"MEMEX_AUTH_ALGORITHMS": value}) == (
+        "missing required settings: [auth] algorithms from MEMEX_AUTH_ALGORITHMS"
+    )
+    raw = raw_config(tmp_path)
+    raw["auth"]["algorithms"] = []
+    assert _refusal(raw) == "missing required settings: [auth] algorithms"

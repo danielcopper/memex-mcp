@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
 from urllib.parse import urlsplit
 
+from jwt.algorithms import HMACAlgorithm, NoneAlgorithm, get_default_algorithms
 from pydantic import AnyHttpUrl, ValidationError
 
 if TYPE_CHECKING:
@@ -187,6 +188,14 @@ _BOUNDS: Mapping[tuple[str, str], _Bound] = {
 # What int() reads as a decimal whole number; it refuses one only past its
 # digit limit.
 _DECIMAL = re.compile(r"\s*[+-]?[0-9]+(?:_[0-9]+)*\s*")
+
+# The algorithms PyJWT verifies with a public key: every one it supports but
+# the shared-secret HMAC ones and "none".
+_ASYMMETRIC_ALGORITHMS = frozenset(
+    name
+    for name, algorithm in get_default_algorithms().items()
+    if not isinstance(algorithm, HMACAlgorithm | NoneAlgorithm)
+)
 
 # Hosts a URL that needs https may still reach over plain http.
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -474,6 +483,7 @@ def _check_required(config: Config, origins: _Origins) -> None:
         ("server", "public_url", config.server.public_url),
         ("auth", "issuer", config.auth.issuer),
         ("auth", "client_ids", config.auth.client_ids),
+        ("auth", "algorithms", config.auth.algorithms),
         ("rights", "access_group", config.rights.access_group),
         ("rights", "household_group", config.rights.household_group),
         ("repo", "path", config.repo.path),
@@ -490,8 +500,17 @@ def _check_required(config: Config, origins: _Origins) -> None:
         raise ConfigError(f"missing required settings: {', '.join(missing)}")
 
 
+def _check_algorithms(config: Config, origins: _Origins) -> None:
+    for algorithm in config.auth.algorithms:
+        if algorithm not in _ASYMMETRIC_ALGORITHMS:
+            where = origins.where("auth", "algorithms")
+            allowed = ", ".join(sorted(_ASYMMETRIC_ALGORITHMS))
+            raise ConfigError(f"{where} has {_shown(algorithm)}, not one of {allowed}")
+
+
 def _validate(config: Config, origins: _Origins) -> None:
     _check_required(config, origins)
+    _check_algorithms(config, origins)
     # git would read such a branch as an option, not a ref.
     if config.repo.branch.startswith("-"):
         raise ConfigError(f"{origins.where('repo', 'branch')} must not start with '-'")
