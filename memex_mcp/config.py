@@ -18,7 +18,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from jwt.algorithms import HMACAlgorithm, NoneAlgorithm, get_default_algorithms
 from pydantic import AnyHttpUrl, ValidationError
@@ -433,47 +433,73 @@ def _parses_as_http_url(url: str) -> bool:
     return True
 
 
-def _scheme_and_host(url: str) -> tuple[str, str] | None:
-    """The scheme and host of ``url``, or None when urlsplit cannot read it."""
+def _split(url: str) -> SplitResult | None:
+    """``url`` split by urlsplit, or None when urlsplit cannot read it."""
     try:
         parts = urlsplit(url)
         _ = parts.port  # raises for a port that is not a number in range
     except ValueError:
         return None
-    return parts.scheme, parts.hostname or ""
+    return parts
 
 
-def _url_problem(url: str, *, https: bool) -> str | None:
-    """What is wrong with ``url``, never quoting it; None when nothing is."""
+def _scheme_problem(parts: SplitResult, *, https: bool) -> str | None:
+    if parts.scheme not in {"http", "https"}:
+        return "must be an https URL" if https else "must be an http or https URL"
+    if not parts.hostname:
+        return "has no host"
+    if https and parts.scheme == "http" and parts.hostname not in _LOOPBACK_HOSTS:
+        return "uses http, needs https (http only for localhost)"
+    return None
+
+
+def _shape_problem(url: str, parts: SplitResult, *, https: bool, origin: bool) -> str | None:
+    # A URL that needs https is published to clients or used to verify their
+    # tokens, so it carries no user or password.
+    if https and "@" in parts.netloc:
+        return "must not carry a user or password"
+    # The server builds its own paths below public_url, from mcp_path.
+    if origin and (parts.path not in {"", "/"} or "?" in url or "#" in url):
+        return "must not have a path, query or fragment; the server serves at mcp_path"
+    return None
+
+
+def _url_problem(url: str, *, https: bool, origin: bool = False) -> str | None:
+    """What is wrong with ``url``, never quoting it; None when nothing is.
+
+    ``https``: https only, http just to a loopback host, no user or password.
+    ``origin``: scheme, host and port only.
+    """
     # urlsplit drops these before it parses; the server uses the URL as given.
     if any(char.isspace() or not char.isprintable() for char in url):
         return "contains whitespace or control characters"
-    split = _scheme_and_host(url)
-    if split is None:
+    parts = _split(url)
+    if parts is None:
         return "is not a valid URL"
-    scheme, host = split
-    if scheme not in {"http", "https"}:
-        return "must be an https URL" if https else "must be an http or https URL"
-    if not host:
-        return "has no host"
-    if https and scheme == "http" and host not in _LOOPBACK_HOSTS:
-        return "uses http, needs https (http only for localhost)"
-    return None if _parses_as_http_url(url) else "is not a valid URL"
+    problem = _scheme_problem(parts, https=https) or _shape_problem(
+        url, parts, https=https, origin=origin
+    )
+    if problem is None and not _parses_as_http_url(url):
+        problem = "is not a valid URL"
+    return problem
 
 
 def _check_urls(config: Config, origins: _Origins) -> None:
-    # (section, key, value, whether it needs https); an empty value is not
-    # checked here (the required ones are refused as missing), and a derived
-    # jwks_url follows the issuer.
-    urls = [
-        ("server", "public_url", config.server.public_url, True),
-        ("auth", "issuer", config.auth.issuer, True),
-        ("auth", "jwks_url", config.auth.jwks_url, True),
-    ]
-    if config.embeddings.enabled:
-        urls.append(("embeddings", "url", config.embeddings.url, False))
-    for section, key, url, https in urls:
-        problem = _url_problem(url, https=https) if url else None
+    # An empty value is not checked here (the required ones are refused as
+    # missing), and a derived jwks_url follows the issuer.
+    for section, key, url, https, origin in [
+        ("server", "public_url", config.server.public_url, True, True),
+        ("auth", "issuer", config.auth.issuer, True, False),
+        ("auth", "jwks_url", config.auth.jwks_url, True, False),
+        (
+            "embeddings",
+            "url",
+            config.embeddings.url if config.embeddings.enabled else "",
+            False,
+            False,
+        ),
+    ]:
+        problem = _url_problem(url, https=https, origin=origin) if url else None
         if problem:
             raise ConfigError(f"{origins.where(section, key)} {problem}")
 

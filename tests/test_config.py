@@ -300,7 +300,8 @@ HTTPS_URLS = [("server", "public_url"), ("auth", "issuer"), ("auth", "jwks_url")
 @pytest.mark.parametrize(
     "url",
     [
-        "https://auth.example.org/application/o/memex/",
+        "https://auth.example.org/",
+        "https://auth.example.org:8443",
         "http://localhost:9000/",
         "http://127.0.0.1:9000/",
         "http://[::1]:9000/",
@@ -462,8 +463,8 @@ def _url_refusal(tmp_path: Path, section: str, key: str, url: str, *, env: bool)
 @pytest.mark.parametrize(
     ("url", "problem"),
     [
-        ("https://u:s3cret@a<b.example.org/", "is not a valid URL"),
-        ("https://u:s3cret@xn--zz.example.org/", "is not a valid URL"),
+        ("https://a<b.example.org/", "is not a valid URL"),
+        ("https://xn--zz.example.org/", "is not a valid URL"),
         ("https://u:s3cret@auth exa.org/", "contains whitespace or control characters"),
         ("https://a b/", "contains whitespace or control characters"),
     ],
@@ -725,3 +726,66 @@ def test_no_algorithm_is_missing(tmp_path: Path, value: str) -> None:
     raw = raw_config(tmp_path)
     raw["auth"]["algorithms"] = []
     assert _refusal(raw) == "missing required settings: [auth] algorithms"
+
+
+@pytest.mark.parametrize("url", ["https://u:s3cret@a<b.example.org/", "http://u:s3cret@xn--zz"])
+def test_a_credential_in_an_embeddings_url_the_server_cannot_parse_is_not_shown(
+    tmp_path: Path, url: str
+) -> None:
+    for env in (False, True):
+        refusal = _url_refusal(tmp_path, "embeddings", "url", url, env=env)
+        assert str(refusal).endswith(" is not a valid URL")
+        assert "s3cret" not in str(refusal)
+        assert refusal.__context__ is None
+
+
+def test_issuer_and_jwks_url_may_have_a_path(tmp_path: Path) -> None:
+    raw = raw_config(tmp_path)
+    raw["server"]["public_url"] = "https://memex.example.org"
+    raw["auth"]["issuer"] = "https://auth.example.org/application/o/memex/"
+    raw["auth"]["jwks_url"] = "https://auth.example.org/application/o/memex/jwks/?x=1#k"
+    config = build_config(raw, {})
+    assert config.server.public_url == "https://memex.example.org"
+    assert config.auth.issuer == "https://auth.example.org/application/o/memex/"
+    assert config.jwks_url == "https://auth.example.org/application/o/memex/jwks/?x=1#k"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://memex.example.org/sub",
+        "https://memex.example.org/mcp/",
+        "https://memex.example.org?x",
+        "https://memex.example.org/?",
+        "https://memex.example.org#f",
+        "https://memex.example.org/#",
+    ],
+)
+def test_the_public_url_has_no_path_query_or_fragment(tmp_path: Path, url: str) -> None:
+    for env in (False, True):
+        message = str(_url_refusal(tmp_path, "server", "public_url", url, env=env))
+        assert message.endswith(
+            " must not have a path, query or fragment; the server serves at mcp_path"
+        )
+        assert "example" not in message
+
+
+@pytest.mark.parametrize("section, key", HTTPS_URLS)
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://u:s3cret@auth.example.org/",
+        "https://u@auth.example.org/",
+        "https://:s3cret@auth.example.org/",
+        "https://@auth.example.org/",
+        "http://u:s3cret@localhost:9000/",
+    ],
+)
+def test_an_https_url_carries_no_user_or_password(
+    tmp_path: Path, section: str, key: str, url: str
+) -> None:
+    for env in (False, True):
+        message = str(_url_refusal(tmp_path, section, key, url, env=env))
+        assert message.endswith(" must not carry a user or password")
+        assert "s3cret" not in message
+        assert "example" not in message
