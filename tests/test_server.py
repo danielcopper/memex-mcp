@@ -52,7 +52,7 @@ async def serve(
     tmp_path: Path, origin: Origin, run_loop: bool = False
 ) -> AsyncGenerator[httpx2.AsyncClient, None]:
     """The app with its lifespan, entered and left in the test's own task."""
-    config = make_config(tmp_path, origin, repo={"fetch_interval_seconds": 0.05})
+    config = make_config(tmp_path, origin, repo={"fetch_interval_seconds": 1})
     memex = Memex.from_config(config, embedder=None)
     with FakeJwks((KEY, "k1")) as jwks:
         verifier = make_verifier(jwks, algorithms=("RS256",))
