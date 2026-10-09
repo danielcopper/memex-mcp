@@ -476,3 +476,50 @@ def test_a_url_with_whitespace_or_control_characters_is_refused(
         message = str(_url_refusal(tmp_path, section, key, url, env=env))
         assert message.endswith(" contains whitespace or control characters")
         assert "example" not in message
+
+
+HUGE = int("f" * 4000, 16)  # past the digit limit of str(); TOML reads it as 0xfff...
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value", "message"),
+    [
+        (
+            "server",
+            "port",
+            HUGE,
+            "must be at least 1 and at most 65535, got <int too long to show>",
+        ),
+        ("server", "port", [HUGE], "must be a whole number, got <list too long to show>"),
+        ("auth", "timeout_seconds", HUGE, "is too large, got <int too long to show>"),
+        ("embeddings", "enabled", HUGE, "must be a boolean, got <int too long to show>"),
+    ],
+    ids=["int setting", "in a list", "float setting", "bool setting"],
+)
+def test_a_value_too_long_to_show_is_described(
+    tmp_path: Path, section: str, key: str, value: object, message: str
+) -> None:
+    raw = raw_config(tmp_path)
+    raw[section][key] = value
+    assert _refusal(raw) == f"[{section}] {key} {message}"
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value", "message"),
+    [
+        ("index", "chunk_chars", "9" * 5000, "is too large"),
+        ("index", "chunk_chars", " +9_" + "9" * 5000, "is too large"),
+        ("index", "chunk_chars", "1__0", "must be a whole number"),
+        ("auth", "timeout_seconds", "9" * 400, "is too large"),
+        ("auth", "timeout_seconds", "-infinity", "must be a finite number"),
+    ],
+    ids=["digits", "sign and underscore", "not a number", "float setting", "infinity"],
+)
+def test_a_number_past_what_python_reads_is_too_large(
+    tmp_path: Path, section: str, key: str, value: str, message: str
+) -> None:
+    env_name = f"MEMEX_{section.upper()}_{key.upper()}"
+    shown = repr(value) if len(repr(value)) <= SHOWN_CHARS else repr(value)[:77] + "..."
+    assert _refusal(raw_config(tmp_path), {env_name: value}) == (
+        f"[{section}] {key} from {env_name} {message}, got {shown}"
+    )

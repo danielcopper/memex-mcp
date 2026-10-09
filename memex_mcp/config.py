@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import tomllib
 from collections.abc import Mapping
 from contextlib import suppress
@@ -175,6 +176,10 @@ _BOUNDS: Mapping[tuple[str, str], _Bound] = {
     ("embeddings", "batch_size"): _Bound(1),
 }
 
+# What int() reads as a decimal whole number; it refuses one only past its
+# digit limit.
+_DECIMAL = re.compile(r"\s*[+-]?[0-9]+(?:_[0-9]+)*\s*")
+
 # Hosts a URL that needs https may still reach over plain http.
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
@@ -207,7 +212,10 @@ class _Origins:
 
 def _shown(value: object) -> str:
     """A given value for a refusal: escaped like repr, at most SHOWN_CHARS long."""
-    text = repr(value)
+    try:
+        text = repr(value)
+    except ValueError:  # an int past the digit limit of str(), alone or in a list
+        return f"<{type(value).__name__} too long to show>"
     return text if len(text) <= SHOWN_CHARS else text[: SHOWN_CHARS - 3] + "..."
 
 
@@ -230,6 +238,8 @@ def _coerce_int(where: str, value: object) -> int:
     if isinstance(value, str):
         with suppress(ValueError):
             return int(value)
+        if _DECIMAL.fullmatch(value):
+            raise ConfigError(f"{where} is too large, got {_shown(value)}")
     raise ConfigError(f"{where} must be a whole number, got {_shown(value)}")
 
 
@@ -238,11 +248,17 @@ def _coerce_float(where: str, value: object) -> float:
         raise ConfigError(f"{where} must be a number, got {_shown(value)}")
     try:
         number = float(value)
-    except (ValueError, OverflowError):  # OverflowError: float() of a huge int
-        raise ConfigError(f"{where} must be a number, got {_shown(value)}") from None
-    if not math.isfinite(number):
-        raise ConfigError(f"{where} must be a finite number, got {_shown(value)}")
-    return number
+    except ValueError:
+        problem = "must be a number"
+    except OverflowError:  # float() of an int past the float range
+        problem = "is too large"
+    else:
+        if math.isfinite(number):
+            return number
+        # float() reads a string of digits past the float range as infinity.
+        spelled = not isinstance(value, str) or "inf" in value.lower()
+        problem = "must be a finite number" if math.isnan(number) or spelled else "is too large"
+    raise ConfigError(f"{where} {problem}, got {_shown(value)}")
 
 
 def _coerce_strings(where: str, value: object) -> tuple[str, ...]:
