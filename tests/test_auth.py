@@ -923,11 +923,34 @@ def test_the_signing_keys_are_the_ones_pyjwt_picks(kty: str, member: str, value:
         assert client.cached_key(kid) is client.match_kid(pyjwt_keys, kid)
 
 
+CACHE_ATTRIBUTES = frozenset({"jwk_set_cache", "jwk_set_with_timestamp"})
+
+
+def assigns_none_to_the_cache(node: ast.AST) -> bool:
+    if isinstance(node, ast.Assign):
+        targets, value = node.targets, node.value
+    elif isinstance(node, ast.AnnAssign):
+        targets, value = [node.target], node.value
+    else:
+        return False
+    return (
+        isinstance(value, ast.Constant)
+        and value.value is None
+        and any(isinstance(t, ast.Attribute) and t.attr in CACHE_ATTRIBUTES for t in targets)
+    )
+
+
 def test_pyjwt_never_clears_the_cached_key_set() -> None:
     """The cache is read without the lock, which holds while PyJWT only replaces the set.
 
-    ``put(None)`` would empty the cache while a fetch runs, and a failed fetch
-    would drop a set that is still valid; check this again on every pin bump.
+    Clearing it would empty the cache while a fetch runs, and a failed fetch would
+    drop a set that is still valid; this fails on a pin bump that adds either.
+
+    It sees, in ``jwt/jwks_client.py``, the first argument of every ``.put(`` call
+    and every assignment of None to an attribute named ``jwk_set_cache`` or
+    ``jwk_set_with_timestamp`` outside ``__init__``. It does not see None passed
+    through a variable, ``setattr`` or ``del``, other methods of the cache, or code
+    in any other module.
     """
     tree = ast.parse(inspect.getsource(jwt.jwks_client))
     puts = [
@@ -939,6 +962,23 @@ def test_pyjwt_never_clears_the_cached_key_set() -> None:
     ]
     assert puts  # the check below would hold for no call at all
     assert [ast.unparse(node.args[0]) for node in puts] == ["jwk_set"] * len(puts)
+    methods = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+    in_init = [
+        node
+        for method in methods
+        if method.name == "__init__"
+        for node in ast.walk(method)
+        if assigns_none_to_the_cache(node)
+    ]
+    # __init__ starts without a cache, in both forms: the match sees each.
+    assert {type(node) for node in in_init} == {ast.Assign, ast.AnnAssign}
+    assert [
+        ast.unparse(node)
+        for method in methods
+        if method.name != "__init__"
+        for node in ast.walk(method)
+        if assigns_none_to_the_cache(node)
+    ] == []
 
 
 HINT = "; is [auth] jwks_url the provider's JWKS endpoint?"
@@ -1035,6 +1075,29 @@ async def test_a_failed_fetch_rejects_the_token_with_one_warning(
     assert bearer not in caplog.text
 
 
+def not_found_with_a_forged_reason(handler: BaseHTTPRequestHandler) -> None:
+    """A 404 whose reason phrase carries a terminal escape and thousands of characters."""
+    handler.send_response(404, "\x1b[31m" + "x" * 3000)
+    handler.send_header("content-length", "0")
+    handler.end_headers()
+
+
+@pytest.mark.anyio
+async def test_the_cause_of_a_failed_fetch_is_escaped_and_cut(
+    jwks: FakeJwks, caplog: pytest.LogCaptureFixture
+) -> None:
+    jwks.answer = not_found_with_a_forged_reason
+    with caplog.at_level(logging.WARNING, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(token()) is None
+    [warning] = warnings_in(caplog)
+    cause = f'{CONNECTION_ERROR}"HTTP Error 404: \\x1b[31m'
+    assert warning.startswith(f"cannot load the key set from {jwks.url}: {cause}")
+    assert "\x1b" not in warning
+    shown = 200 - len('Fail to fetch data from the url, err: "HTTP Error 404: \x1b[31m')
+    assert f"{'x' * shown}…{NOT_FOUND}" in warning
+    assert "x" * (shown + 1) not in warning
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "entry",
@@ -1069,14 +1132,25 @@ async def test_an_unknown_kid_is_logged_at_info(
     assert warnings_in(caplog) == []
 
 
+USE_FOO_K0 = {**GOOD_JWK, "use": "foo", "kid": "k0"}
+ENC_K0 = {**ENC_JWK, "kid": "k0"}
+NOT_USED = (
+    "bearer token rejected: no signing key for kid 'k0': the set names the kid, but its entry"
+)
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "entry",
-    [UNUSABLE_K0, {**GOOD_JWK, "use": "foo", "kid": "k0"}, {**ENC_JWK, "kid": "k0"}],
+    ("entry", "why"),
+    [
+        (UNUSABLE_K0, "is unusable: InvalidKeyError"),
+        (USE_FOO_K0, "has use 'foo', not 'sig'"),
+        (ENC_K0, "is an encryption key"),
+    ],
     ids=["unusable", "use foo", "encryption key"],
 )
 async def test_a_kid_whose_entry_is_not_used_says_so(
-    jwks: FakeJwks, entry: dict[str, object], caplog: pytest.LogCaptureFixture
+    jwks: FakeJwks, entry: dict[str, object], why: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     jwks.answer = answer_json({"keys": [entry, GOOD_JWK]})
     verifier = make_verifier(jwks)
@@ -1086,10 +1160,36 @@ async def test_a_kid_whose_entry_is_not_used_says_so(
             assert await verifier.verify_token(token(kid="k0")) is None
         assert await verifier.verify_token(token(kid="k9")) is None
     rejections = [m for m in caplog.messages if m.startswith("bearer token rejected")]
-    assert rejections == [
-        "bearer token rejected: no signing key for kid 'k0': "
-        + "the set names the kid, but its entry is unusable",
-    ] * 2 + ["bearer token rejected: no signing key for kid 'k9'"]
+    assert rejections == [f"{NOT_USED} {why}"] * 2 + [
+        "bearer token rejected: no signing key for kid 'k9'"
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("later", "reason"),
+    [
+        ([GOOD_JWK], ""),
+        ([ENC_K0, GOOD_JWK], ": the set names the kid, but its entry is an encryption key"),
+    ],
+    ids=["entry gone", "entry unused for another reason"],
+)
+async def test_a_refetch_replaces_what_is_known_about_unused_entries(
+    jwks: FakeJwks,
+    clock: Clock,
+    later: list[dict[str, object]],
+    reason: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    jwks.answer = answer_json({"keys": [USE_FOO_K0, GOOD_JWK]})
+    verifier = make_verifier(jwks)
+    assert await verifier.verify_token(token(kid="k0")) is None
+    jwks.answer = answer_json({"keys": later})
+    clock.now += JWKS_LIFESPAN_SECONDS + 1
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        assert await verifier.verify_token(token(kid="k0")) is None
+    assert jwks.fetches == 2
+    assert caplog.messages[-1] == f"bearer token rejected: no signing key for kid 'k0'{reason}"
 
 
 @pytest.mark.anyio

@@ -75,6 +75,8 @@ _ENTRY_REFUSED = (
 _KID_CHARS = 64
 # ... and of a token's issuer, enough to show where it differs from the configured one.
 _ISSUER_CHARS = 200
+# ... and of an exception's text, which can quote what the endpoint answered.
+_TEXT_CHARS = 200
 
 # A fetched set logs at most this many lines about entries it will not use.
 _ENTRY_LINES = 10
@@ -82,6 +84,15 @@ _ENTRY_LINES = 10
 
 def _clip(text: str, chars: int = _KID_CHARS) -> str:
     return text if len(text) <= chars else text[:chars] + "…"
+
+
+def _escaped(text: str, chars: int) -> str:
+    """``text`` cut to ``chars`` characters, backslashes and all but printable ASCII escaped.
+
+    Unlike ``repr`` it adds no quotes, so a message that needs no escaping reads as before.
+    """
+    escaped = text[:chars].encode("unicode_escape").decode("ascii")
+    return escaped if len(text) <= chars else escaped + "…"
 
 
 def _member(value: object) -> str:
@@ -101,36 +112,40 @@ def _is_signing_key(key: jwt.PyJWK) -> bool:
     return key.public_key_use in ("sig", None) and bool(key.key_id)
 
 
+def _about(entry: dict[str, object]) -> str:
+    """The members that tell key set entries apart, for a log line."""
+    return ", ".join(f"{name} {_member(entry.get(name))}" for name in ("kid", "kty", "alg"))
+
+
 def _unused(entry: object) -> tuple[int, str] | None:
     """Why PyJWKClient will not use a key set entry, with the log level; None for a signing key."""
     if not isinstance(entry, dict):
         return logging.WARNING, f"is {json_kind(entry)}, not an object"
     data = cast("dict[str, object]", entry)  # a JSON object's keys are strings
-    about = ", ".join(f"{name} {_member(data.get(name))}" for name in ("kid", "kty", "alg"))
     use = data.get("use")
     if use == "enc":
         # Authentik lists its encryption key here when one is set.
-        return logging.DEBUG, f"({about}) is an encryption key"
+        return logging.DEBUG, "is an encryption key"
     try:
         key = jwt.PyJWK(data)
     except jwt.PyJWTError as exc:
         # Only the type: PyJWT's messages may quote the whole key.
-        return logging.WARNING, f"({about}) is unusable: {type(exc).__name__}"
+        return logging.WARNING, f"is unusable: {type(exc).__name__}"
     if _is_signing_key(key):
         return None
     if not key.key_id:
-        return logging.WARNING, f"({about}) has no kid"
-    return logging.WARNING, f"({about}) has use {_member(use)}, not 'sig'"
+        return logging.WARNING, "has no kid"
+    return logging.WARNING, f"has use {_member(use)}, not 'sig'"
 
 
 def _review(
     entries: list[object],
-) -> tuple[tuple[object, ...], frozenset[str], list[tuple[int, str]]]:
-    """The kids of the signing keys in a fetched set, the kids of the entries it will not
-    use, and a log line for every other entry: the ones about objects first.
+) -> tuple[tuple[object, ...], dict[str, str], list[tuple[int, str]]]:
+    """The kids of the signing keys in a fetched set, the reason by kid for the entries it
+    will not use, and a log line for every other entry: the ones about objects first.
     """
     kids: list[object] = []
-    unusable: set[str] = set()
+    unusable: dict[str, str] = {}
     notes: list[tuple[int, str]] = []
     # Lines about entries that are not even objects come after the others.
     junk: list[tuple[int, str]] = []
@@ -138,14 +153,14 @@ def _review(
         unused = _unused(entry)
         if unused is not None:
             level, why = unused
-            line = (level, f"key set entry {index} {why}; not used")
             if not isinstance(entry, dict):
-                junk.append(line)
+                junk.append((level, f"key set entry {index} {why}; not used"))
                 continue
-            notes.append(line)
-            kid = cast("dict[str, object]", entry).get("kid")
+            data = cast("dict[str, object]", entry)
+            notes.append((level, f"key set entry {index} ({_about(data)}) {why}; not used"))
+            kid = data.get("kid")
             if isinstance(kid, str) and kid:
-                unusable.add(kid)
+                unusable.setdefault(kid, why)
             continue
         kid = cast("dict[str, object]", entry)["kid"]
         if not isinstance(kid, str):
@@ -155,7 +170,7 @@ def _review(
             why = f"repeats kid {_member(kid)}; PyJWT uses the first"
             notes.append((logging.WARNING, f"key set entry {index} {why}"))
         kids.append(kid)
-    return tuple(kids), frozenset(unusable), notes + junk
+    return tuple(kids), unusable, notes + junk
 
 
 def _log_notes(notes: list[tuple[int, str]]) -> None:
@@ -212,16 +227,16 @@ class _ProviderJwks(jwt.PyJWKClient):
         self._failures: int = 0
         self._entries: str | None = None
         self._kids: tuple[object, ...] | None = None
-        self._unusable: frozenset[str] = frozenset()
+        self._unusable: dict[str, str] = {}
 
     @property
     def has_no_signing_key(self) -> bool:
         """Whether the last fetched set held no key PyJWKClient would sign with."""
         return self._kids == ()
 
-    def names_unusable(self, kid: str) -> bool:
-        """Whether an entry of the last fetched set that is not used carries ``kid``."""
-        return kid in self._unusable
+    def unused_entry(self, kid: str) -> str | None:
+        """Why the entry with ``kid`` in the last fetched set is not used; None if none is."""
+        return self._unusable.get(kid)
 
     def cached_key(self, kid: str) -> jwt.PyJWK | None:
         """The signing key for ``kid`` from a cached set that has not expired, or None.
@@ -264,7 +279,7 @@ class _ProviderJwks(jwt.PyJWKClient):
             "cannot load the key set from %s: %s: %s%s; %s; no new fetch for %g s",
             self.uri,
             type(exc).__name__,
-            str(exc) or "no detail",
+            _escaped(str(exc), _TEXT_CHARS) or "no detail",
             _explanation(exc),
             consequence,
             self._wait,
@@ -352,8 +367,8 @@ class AuthentikTokenVerifier(TokenVerifier):
                 reason = ": the key set could not be fetched"
             elif self._jwks.has_no_signing_key:
                 reason = ": the key set has no signing key"
-            elif self._jwks.names_unusable(kid):
-                reason = ": the set names the kid, but its entry is unusable"
+            elif (why := self._jwks.unused_entry(kid)) is not None:
+                reason = f": the set names the kid, but its entry {why}"
             else:
                 reason = ""
             log.info("bearer token rejected: no signing key for kid %r%s", _clip(kid), reason)
