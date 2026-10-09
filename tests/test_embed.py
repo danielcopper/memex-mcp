@@ -10,6 +10,7 @@ import httpx2
 import pytest
 
 from memex_mcp.embed import EmbeddingError, OllamaEmbedder
+from tests.conftest import NestedTooDeeply
 
 
 def raw_answer(body: bytes) -> httpx2.Response:
@@ -17,7 +18,8 @@ def raw_answer(body: bytes) -> httpx2.Response:
     return httpx2.Response(200, content=body, headers={"content-type": "application/json"})
 
 
-# A closed document, so that nothing but the depth can fail it.
+# Deep enough that json runs out of an 8 MB stack; with more stack it parses
+# into nested lists. Either way the answer is an EmbeddingError.
 NESTED_TOO_DEEPLY = b"[" * 100_000 + b"]" * 100_000
 
 
@@ -88,7 +90,7 @@ def test_embeds_a_batch_in_order() -> None:
         "vector-subnormal",
         "vector-too-long",
         "no-embeddings-member",
-        "nested-too-deeply",
+        "nested-deeply",
     ],
 )
 def test_bad_answers_raise_embedding_error(response: httpx2.Response) -> None:
@@ -136,7 +138,7 @@ def test_bad_answers_raise_embedding_error(response: httpx2.Response) -> None:
             ["a"],
             "vector 0 is too long: its squared length overflows float32",
         ),
-        (raw_answer(NESTED_TOO_DEEPLY), ["a"], "the answer is nested too deeply"),
+        (NestedTooDeeply(200, content=b"[]"), ["a"], "the answer is nested too deeply"),
         (
             httpx2.Response(200, json={"model": "bge-m3", "error": "no such route"}),
             ["a"],
@@ -208,6 +210,7 @@ OLLAMA_ERROR = 'model "bge-m3" not found, try pulling it first'
         (httpx2.Response(500, json={"error": 5}), "HTTP 500 Internal Server Error"),
         (httpx2.Response(500, json=["error"]), "HTTP 500 Internal Server Error"),
         (httpx2.Response(500, content=NESTED_TOO_DEEPLY), "HTTP 500 Internal Server Error"),
+        (NestedTooDeeply(500, content=b"[]"), "HTTP 500 Internal Server Error"),
     ],
     ids=[
         "model-missing",
@@ -215,6 +218,7 @@ OLLAMA_ERROR = 'model "bge-m3" not found, try pulling it first'
         "not-json",
         "error-not-text",
         "not-an-object",
+        "nested-deeply",
         "nested-too-deeply",
     ],
 )

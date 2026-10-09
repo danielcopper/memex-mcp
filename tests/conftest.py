@@ -205,9 +205,22 @@ def null_vectors(texts: list[str]) -> httpx2.Response:
     )
 
 
+class NestedTooDeeply(httpx2.Response):
+    """An answer whose JSON runs out of stack while it is decoded.
+
+    How deep a document must be for that depends on the Python build and the
+    stack size (a document that overflows an 8 MB stack parses with 16 MB), so
+    the error is raised here instead of by a deep document.
+    """
+
+    @override
+    def json(self, **kwargs: object) -> object:
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+
+
 def nested_too_deeply(_texts: list[str]) -> httpx2.Response:
-    """An answer nested deeper than Python's json module can parse."""
-    return httpx2.Response(200, content=b"[" * 100_000 + b"]" * 100_000)
+    """An answer the json module runs out of stack on."""
+    return NestedTooDeeply(200, content=b"[]")
 
 
 def malformed_ollama(

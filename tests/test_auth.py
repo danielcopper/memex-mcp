@@ -1025,12 +1025,6 @@ NOT_FOUND = "; check [auth] jwks_url, by default the issuer's path plus jwks/"
 FETCH_FAILURES: dict[str, tuple[Answer, str, str]] = {
     "not JSON": (answer_raw(b"<html>login</html>"), "JSONDecodeError: ", HINT),
     "not UTF-8": (answer_raw(b"\xff\xfe\x00"), "UnicodeDecodeError: ", HINT),
-    # A closed document, so that nothing but the depth can fail it.
-    "nested too deeply": (
-        answer_raw(b"[" * 100_000 + b"]" * 100_000),
-        "RecursionError: ",
-        HINT,
-    ),
     "not an object": (
         answer_json([GOOD_JWK]),
         "PyJWKClientError: The JWKS endpoint did not return a JSON object",
@@ -1123,6 +1117,33 @@ async def test_the_cause_of_a_failed_fetch_is_escaped_and_cut(
     shown = 200 - len('Fail to fetch data from the url, err: "HTTP Error 404: \x1b[31m')
     assert f"{'x' * shown}…{NOT_FOUND}" in warning
     assert "x" * (shown + 1) not in warning
+
+
+class JsonOutOfStack:
+    """Stands in for the ``json`` module where PyJWT decodes the key set: it runs out of stack.
+
+    How deep a document must be for that depends on the Python build and the
+    stack size (one that overflows an 8 MB stack parses with 16 MB, and then
+    fails as "not an object"), so the error is raised here instead.
+    """
+
+    @staticmethod
+    def load(_answer: object) -> object:
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+
+
+@pytest.mark.anyio
+async def test_a_key_set_nested_too_deeply_fails_the_fetch(
+    jwks: FakeJwks, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(jwt.jwks_client, "json", JsonOutOfStack)
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(token()) is None
+    assert warnings_in(caplog) == [
+        f"cannot load the key set from {jwks.url}: RecursionError: maximum recursion depth "
+        + f"exceeded while decoding a JSON array{HINT}; {ALL_REJECTED}; {NO_FETCH_FOR}"
+    ]
+    assert caplog.messages[-1] == REJECTED_UNFETCHED
 
 
 @pytest.mark.anyio
