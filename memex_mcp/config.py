@@ -567,13 +567,21 @@ def _check_algorithms(config: Config, origins: _Origins) -> None:
 
 
 def _check_names(config: Config, origins: _Origins) -> None:
-    # git and the file system take these as given: a trailing newline from a
-    # secret file or a NUL would fail every fetch or every read.
-    for section, key, value in (
+    # git, the file system, the group check and the embedder take these as
+    # given: a trailing newline from a secret file or a NUL would fail every
+    # fetch, read, caller or embedding. A remote may carry a credential, so no
+    # refusal shows a value.
+    names = [
+        ("rights", "access_group", config.rights.access_group),
+        ("rights", "household_group", config.rights.household_group),
+        ("repo", "remote", config.repo.remote),
         ("repo", "branch", config.repo.branch),
         ("repo", "path", config.repo.path),
         ("index", "path", config.index.path),
-    ):
+    ]
+    if config.embeddings.enabled:
+        names.append(("embeddings", "model", config.embeddings.model))
+    for section, key, value in names:
         if _has_space_or_control(value):
             where = origins.where(section, key)
             raise ConfigError(f"{where} contains whitespace or control characters")

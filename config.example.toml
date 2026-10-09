@@ -4,8 +4,8 @@
 # Each number setting states its range below; one marked as a whole number
 # takes no decimal point, the others may have one. Numbers and booleans go
 # without quotes here; only an environment variable gives them as text. The
-# branch, the paths and the area names take no whitespace or control
-# characters.
+# group names, the remote, the branch, the paths, the area names and the
+# embeddings model take no whitespace or control characters.
 
 [server]
 host = "0.0.0.0"

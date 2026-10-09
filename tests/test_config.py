@@ -906,3 +906,64 @@ def test_a_url_with_a_backslash_is_refused(
         for part in ("example", "localhost", "s3cret", "\\"):
             assert part not in str(refusal)
         assert refusal.__context__ is None
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("rights", "access_group", "memex"),
+        ("rights", "household_group", "household"),
+        ("embeddings", "model", "bge-m3"),
+        ("repo", "remote", "https://bot:s3cret@git.example.org/memex.git"),
+    ],
+)
+@pytest.mark.parametrize(
+    "blank",
+    ["{}\n", " {}", "{}\t", "{}\x00", "\u200b{}"],
+    ids=["newline", "space", "tab", "nul", "zwsp"],
+)
+def test_a_group_model_or_remote_with_blanks_is_refused(
+    tmp_path: Path, section: str, key: str, value: str, blank: str
+) -> None:
+    given = blank.format(value)
+    raw = raw_config(tmp_path)
+    raw.setdefault(section, {})[key] = given
+    assert _refusal(raw) == f"[{section}] {key} contains whitespace or control characters"
+    message = _refusal(raw_config(tmp_path), {_env(section, key): given})
+    assert message == (
+        f"[{section}] {key} from {_env(section, key)} contains whitespace or control characters"
+    )
+
+
+def test_a_refused_remote_is_never_shown(tmp_path: Path) -> None:
+    remote = "https://bot:s3cret@git.example.org/memex.git\n"
+    for env in ({}, {"MEMEX_REPO_REMOTE": remote}):
+        raw = raw_config(tmp_path)
+        if not env:
+            raw["repo"]["remote"] = remote
+        message = _refusal(raw, env)
+        for part in ("bot", "s3cret", "example", "memex.git"):
+            assert part not in message
+
+
+def test_the_model_is_not_checked_while_embeddings_are_disabled(tmp_path: Path) -> None:
+    raw = raw_config(tmp_path)
+    raw["embeddings"].update({"model": "bge-m3\n", "enabled": False})
+    assert build_config(raw, {}).embeddings.model == "bge-m3\n"
+
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        "https://bot:s3cret@git.example.org/memex.git",
+        "ssh://git@git.example.org:2222/alice/memex.git",
+        "git@git.example.org:alice/memex.git",
+        "/srv/git/memex.git",
+        "file:///srv/git/memex.git",
+    ],
+)
+def test_a_remote_is_otherwise_unchecked(tmp_path: Path, remote: str) -> None:
+    raw = raw_config(tmp_path)
+    raw["repo"]["remote"] = remote
+    assert build_config(raw, {}).repo.remote == remote
+    assert build_config(raw_config(tmp_path), {"MEMEX_REPO_REMOTE": remote}).repo.remote == remote
