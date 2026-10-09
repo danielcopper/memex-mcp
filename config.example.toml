@@ -1,11 +1,16 @@
 # memex-mcp configuration. Every scalar or list setting can be overridden by an
 # environment variable MEMEX_<SECTION>_<KEY>, e.g. MEMEX_REPO_REMOTE or
 # MEMEX_AUTH_CLIENT_IDS (comma-separated). All values below are examples.
+# Whole-number settings take no decimal point; "seconds" settings take any
+# finite number unless noted.
 
 [server]
 host = "0.0.0.0"
+# 1 to 65535.
 port = 8000
 # The URL clients use; the resource advertised to them is public_url + mcp_path.
+# https, or http to localhost, 127.0.0.1 or [::1]; the same holds for the
+# issuer and jwks_url below.
 public_url = "https://memex.example.org"
 mcp_path = "/mcp"
 log_level = "INFO"
@@ -19,12 +24,15 @@ issuer = "https://auth.example.org/application/o/memex/"
 client_ids = ["memex-claude-code"]
 algorithms = ["RS256", "ES256"]
 scopes = ["openid", "profile", "offline_access"]
+# Whole seconds, at least 0.
 leeway_seconds = 30
 # A token naming a key the cached key set lacks fetches the set again, but not
 # sooner than this after the last successful fetch, and a failed fetch is not
 # tried again for this long (nor sooner than timeout_seconds); the set itself
-# is fetched again on the first request after five minutes.
+# is fetched again on the first request after five minutes. Whole seconds, at
+# least 0.
 jwks_min_refetch_seconds = 60
+# Greater than 0.
 timeout_seconds = 5.0
 
 [rights]
@@ -38,24 +46,34 @@ path = "/data/clone"
 # in MEMEX_REPO_REMOTE, not in this file.
 remote = "https://git.example.org/alice/memex.git"
 branch = "main"
+# At least 1.
 fetch_interval_seconds = 60
+# Greater than 0.
 git_timeout_seconds = 60
 
 [index]
 path = "/data/index/memex.sqlite3"
+# Greater than 0, at most 1.
 archive_factor = 0.5
+# Whole numbers: snippet_chars at least 40, chunk_chars at least 100,
+# max_limit at least 1.
 snippet_chars = 300
 chunk_chars = 1500
 max_limit = 50
 
 [embeddings]
 enabled = true
+# http or https; checked only while enabled.
 url = "http://ollama.example.org:11434"
 model = "bge-m3"
+# Whole number, at least 1.
 dimensions = 1024
+# Both timeouts greater than 0.
 query_timeout_seconds = 3.0
 index_timeout_seconds = 120.0
+# At least 0.
 retry_after_seconds = 60.0
+# Whole number, at least 1.
 batch_size = 32
 
 # Authentik username (preferred_username) -> the user's own area directory.

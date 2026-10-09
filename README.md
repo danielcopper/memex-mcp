@@ -72,6 +72,8 @@ caller's rights gets exactly the answer a missing one gets, so the server does n
 One TOML file, named by `--config` or `MEMEX_CONFIG`; [`config.example.toml`](config.example.toml) lists every setting.
 Any scalar or list setting can be overridden by an environment variable `MEMEX_<SECTION>_<KEY>` (lists comma-separated),
 for example `MEMEX_REPO_REMOTE` for a remote URL that carries a credential. The `[users]` table lives in the file only.
+The server checks every value at startup and refuses to start on one it cannot use (a wrong type, a number out of range,
+a URL without https), naming the setting and the file or variable it came from; the example file states the ranges.
 
 | Setting                                                    | Default                                    | Meaning                                                                   |
 | ---------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------- |

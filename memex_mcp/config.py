@@ -9,12 +9,15 @@ secrets and URLs need not live in the file. The identity-to-area mapping
 from __future__ import annotations
 
 import logging
+import math
 import os
 import tomllib
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, override
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -22,6 +25,10 @@ if TYPE_CHECKING:
 ENV_PREFIX = "MEMEX_"
 CONFIG_ENV = "MEMEX_CONFIG"
 MIN_SNIPPET_CHARS = 40
+# The smallest chunk_chars; at 0 the chunker would never end.
+MIN_CHUNK_CHARS = 100
+# A refusal shows a given number or boolean value, escaped and cut to this length.
+SHOWN_CHARS = 80
 
 
 class ConfigError(ValueError):
@@ -127,6 +134,81 @@ class Config:
 _SECTIONS = frozenset(f.name for f in fields(Config))
 
 
+@dataclass(frozen=True)
+class _Bound:
+    """The range a number setting must lie in."""
+
+    low: int
+    above: bool = False  # the value must be greater than `low`, not equal to it
+    high: int | None = None
+
+    def holds(self, number: float) -> bool:
+        if number < self.low or (self.above and number == self.low):
+            return False
+        return self.high is None or number <= self.high
+
+    @override
+    def __str__(self) -> str:
+        low = f"greater than {self.low}" if self.above else f"at least {self.low}"
+        return low if self.high is None else f"{low} and at most {self.high}"
+
+
+# Every number setting has a bound, so that a value the server cannot run with
+# refuses to start instead of hanging, busy-looping or failing every call.
+_BOUNDS: Mapping[tuple[str, str], _Bound] = {
+    ("server", "port"): _Bound(1, high=65535),
+    ("auth", "leeway_seconds"): _Bound(0),
+    ("auth", "jwks_min_refetch_seconds"): _Bound(0),
+    ("auth", "timeout_seconds"): _Bound(0, above=True),
+    ("repo", "fetch_interval_seconds"): _Bound(1),
+    ("repo", "git_timeout_seconds"): _Bound(0, above=True),
+    ("index", "archive_factor"): _Bound(0, above=True, high=1),
+    ("index", "snippet_chars"): _Bound(MIN_SNIPPET_CHARS),
+    ("index", "chunk_chars"): _Bound(MIN_CHUNK_CHARS),
+    ("index", "max_limit"): _Bound(1),
+    ("embeddings", "dimensions"): _Bound(1),
+    ("embeddings", "query_timeout_seconds"): _Bound(0, above=True),
+    ("embeddings", "index_timeout_seconds"): _Bound(0, above=True),
+    ("embeddings", "retry_after_seconds"): _Bound(0),
+    ("embeddings", "batch_size"): _Bound(1),
+}
+
+# Hosts a URL that needs https may still reach over plain http.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _env_name(section: str, key: str) -> str:
+    return f"{ENV_PREFIX}{section.upper()}_{key.upper()}"
+
+
+@dataclass(frozen=True)
+class _Origins:
+    """Where the settings came from, for refusals that name a setting.
+
+    A refusal names the setting with the environment variable that set it, or
+    with the config file; a setting nobody set has its default, which no check
+    refuses.
+    """
+
+    env: Mapping[str, str]
+    source: str | None
+
+    def where(self, section: str, key: str) -> str:
+        env_name = _env_name(section, key)
+        if env_name in self.env:
+            return f"[{section}] {key} from {env_name}"
+        return self.in_file(f"[{section}] {key}")
+
+    def in_file(self, name: str) -> str:
+        return name if self.source is None else f"{name} in {self.source}"
+
+
+def _shown(value: object) -> str:
+    """A given value for a refusal: escaped like repr, at most SHOWN_CHARS long."""
+    text = repr(value)
+    return text if len(text) <= SHOWN_CHARS else text[: SHOWN_CHARS - 3] + "..."
+
+
 def _coerce_bool(where: str, value: object) -> bool:
     if isinstance(value, str):
         lowered = value.strip().lower()
@@ -136,19 +218,29 @@ def _coerce_bool(where: str, value: object) -> bool:
             return False
     if isinstance(value, bool):
         return value
-    raise ConfigError(f"{where} must be a boolean")
+    raise ConfigError(f"{where} must be a boolean, got {_shown(value)}")
 
 
-def _coerce_number[N: (int, float)](kind: type[N], value: object, message: str) -> N:
-    # TOML and the environment give strings, numbers, booleans, lists, tables
-    # and dates; only the first three can convert, the rest fail like a string
-    # that does not.
-    if not isinstance(value, str | int | float):
-        raise ConfigError(message)
+def _coerce_int(where: str, value: object) -> int:
+    # A float is refused even when whole: int() would cut 8000.9 to 8000.
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        with suppress(ValueError):
+            return int(value)
+    raise ConfigError(f"{where} must be a whole number, got {_shown(value)}")
+
+
+def _coerce_float(where: str, value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        raise ConfigError(f"{where} must be a number, got {_shown(value)}")
     try:
-        return kind(value)
-    except (ValueError, OverflowError):  # OverflowError: int() of an infinite float
-        raise ConfigError(message) from None
+        number = float(value)
+    except (ValueError, OverflowError):  # OverflowError: float() of a huge int
+        raise ConfigError(f"{where} must be a number, got {_shown(value)}") from None
+    if not math.isfinite(number):
+        raise ConfigError(f"{where} must be a finite number, got {_shown(value)}")
+    return number
 
 
 def _coerce_strings(where: str, value: object) -> tuple[str, ...]:
@@ -162,82 +254,131 @@ def _coerce_strings(where: str, value: object) -> tuple[str, ...]:
     raise ConfigError(f"{where} must be a list of strings")
 
 
-def _coerce(section: str, key: str, value: object, default: object) -> object:
-    where = f"[{section}] {key}"
+def _coerce(section: str, key: str, where: str, value: object, default: object) -> object:
     if isinstance(default, bool):
         return _coerce_bool(where, value)
-    if isinstance(default, int):
-        return _coerce_number(int, value, f"{where} must be an integer")
-    if isinstance(default, float):
-        return _coerce_number(float, value, f"{where} must be a number")
+    if isinstance(default, int | float):
+        # TOML and the environment give strings, numbers, booleans, lists,
+        # tables and dates; a number setting takes a number or a string of one,
+        # never a boolean, though Python counts it as an int.
+        number = (
+            _coerce_int(where, value) if isinstance(default, int) else _coerce_float(where, value)
+        )
+        bound = _BOUNDS[section, key]
+        if not bound.holds(number):
+            raise ConfigError(f"{where} must be {bound}, got {_shown(value)}")
+        return number
     if isinstance(default, tuple):
         return _coerce_strings(where, value)
+    # A string setting's value is never shown: it may be a URL with a credential.
     if not isinstance(value, str):
         raise ConfigError(f"{where} must be a string")
     return value
 
 
 def _section[S: DataclassInstance](
-    name: str, defaults: S, raw: Mapping[str, object], env: Mapping[str, str]
+    name: str, defaults: S, raw: Mapping[str, object], origins: _Origins
 ) -> S:
     value = raw.get(name, {})
     if not isinstance(value, dict):
-        raise ConfigError(f"[{name}] must be a table")
+        raise ConfigError(f"{origins.in_file(f'[{name}]')} must be a table")
     table = cast("dict[str, object]", value)  # a TOML table's keys are strings
     known = {f.name for f in fields(defaults)}
     unknown = set(table) - known
     if unknown:
-        raise ConfigError(f"[{name}] has unknown keys: {', '.join(sorted(unknown))}")
+        where = origins.in_file(f"[{name}]")
+        raise ConfigError(f"{where} has unknown keys: {', '.join(sorted(unknown))}")
     values: dict[str, object] = {}
     for f in fields(defaults):
         default = cast("object", getattr(defaults, f.name))
-        env_name = f"{ENV_PREFIX}{name.upper()}_{f.name.upper()}"
-        if env_name in env:
-            values[f.name] = _coerce(name, f.name, env[env_name], default)
+        env_name = _env_name(name, f.name)
+        where = origins.where(name, f.name)
+        if env_name in origins.env:
+            values[f.name] = _coerce(name, f.name, where, origins.env[env_name], default)
         elif f.name in table:
-            values[f.name] = _coerce(name, f.name, table[f.name], default)
+            values[f.name] = _coerce(name, f.name, where, table[f.name], default)
     return replace(defaults, **values)
 
 
 def _check_area_name(name: str, where: str) -> None:
     if not name or "/" in name or "\\" in name or name.startswith(".") or name in {"..", "."}:
-        raise ConfigError(f"{where}: {name!r} is not a single, visible directory name")
+        raise ConfigError(f"{where} is not a single, visible directory name")
 
 
-def build_config(raw: Mapping[str, object], env: Mapping[str, str]) -> Config:
-    """Build and validate a Config from parsed TOML and an environment."""
-    unknown = set(raw) - _SECTIONS
-    if unknown:
-        raise ConfigError(f"unknown sections: {', '.join(sorted(unknown))}")
-    server = _section("server", ServerConfig(), raw, env)
-    auth = _section("auth", AuthConfig(), raw, env)
-    rights = _section("rights", RightsConfig(), raw, env)
-    repo = _section("repo", RepoConfig(), raw, env)
-    index = _section("index", IndexConfig(), raw, env)
-    embeddings = _section("embeddings", EmbeddingsConfig(), raw, env)
+def _users(raw: Mapping[str, object], origins: _Origins) -> dict[str, str]:
     users_raw = raw.get("users", {})
     if not isinstance(users_raw, dict):
-        raise ConfigError("[users] must map usernames to area directories")
+        where = origins.in_file("[users]")
+        raise ConfigError(f"{where} must map usernames to area directories")
     users: dict[str, str] = {}
     for username, area in cast("dict[object, object]", users_raw).items():
+        where = origins.in_file(f"[users] {username}")
         if not isinstance(area, str):
-            raise ConfigError(f"[users] {username}: the area must be a string")
-        _check_area_name(area, f"[users] {username}")
+            raise ConfigError(f"{where} must be a string")
+        _check_area_name(area, where)
         users[str(username)] = area
+    return users
+
+
+def build_config(
+    raw: Mapping[str, object], env: Mapping[str, str], source: str | Path | None = None
+) -> Config:
+    """Build and validate a Config from parsed TOML and an environment.
+
+    ``source`` names the file ``raw`` was read from, for the refusals.
+    """
+    origins = _Origins(env, None if source is None else str(source))
+    unknown = set(raw) - _SECTIONS
+    if unknown:
+        where = origins.in_file("unknown sections")
+        raise ConfigError(f"{where}: {', '.join(sorted(unknown))}")
     config = Config(
-        server=server,
-        auth=auth,
-        rights=rights,
-        repo=repo,
-        index=index,
-        embeddings=embeddings,
-        users=users,
+        server=_section("server", ServerConfig(), raw, origins),
+        auth=_section("auth", AuthConfig(), raw, origins),
+        rights=_section("rights", RightsConfig(), raw, origins),
+        repo=_section("repo", RepoConfig(), raw, origins),
+        index=_section("index", IndexConfig(), raw, origins),
+        embeddings=_section("embeddings", EmbeddingsConfig(), raw, origins),
+        users=_users(raw, origins),
     )
-    _validate(config)
+    _validate(config, origins)
     return config
 
 
-def _validate(config: Config) -> None:
+def _url_problem(url: str, *, https: bool) -> str | None:
+    """What is wrong with ``url``, never quoting it; None when nothing is."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        _ = parts.port  # raises for a port that is not a number in range
+    except ValueError:
+        return "is not a valid URL"
+    if parts.scheme not in {"http", "https"}:
+        return "must be an https URL" if https else "must be an http or https URL"
+    if not host:
+        return "has no host"
+    if https and parts.scheme == "http" and host not in _LOOPBACK_HOSTS:
+        return "uses http, needs https (http only for localhost)"
+    return None
+
+
+def _check_urls(config: Config, origins: _Origins) -> None:
+    # (section, key, value, whether it needs https); empty values are left to
+    # the check for missing settings, and a derived jwks_url follows the issuer.
+    urls = [
+        ("server", "public_url", config.server.public_url, True),
+        ("auth", "issuer", config.auth.issuer, True),
+        ("auth", "jwks_url", config.auth.jwks_url, True),
+    ]
+    if config.embeddings.enabled:
+        urls.append(("embeddings", "url", config.embeddings.url, False))
+    for section, key, url, https in urls:
+        problem = _url_problem(url, https=https) if url else None
+        if problem:
+            raise ConfigError(f"{origins.where(section, key)} {problem}")
+
+
+def _validate(config: Config, origins: _Origins) -> None:
     missing = [
         name
         for name, value in (
@@ -252,22 +393,21 @@ def _validate(config: Config) -> None:
         missing.append("[auth] client_ids")
     if missing:
         raise ConfigError(f"missing required settings: {', '.join(missing)}")
+    _check_urls(config, origins)
     if not config.server.mcp_path.startswith("/"):
-        raise ConfigError("[server] mcp_path must start with '/'")
+        raise ConfigError(f"{origins.where('server', 'mcp_path')} must start with '/'")
     # The server hands the upper-cased name to logging.basicConfig.
     if config.server.log_level.upper() not in logging.getLevelNamesMapping():
-        raise ConfigError("[server] log_level must be a logging level such as INFO or DEBUG")
+        where = origins.where("server", "log_level")
+        raise ConfigError(f"{where} must be a logging level such as INFO or DEBUG")
     household = config.rights.household_area
-    _check_area_name(household, "[rights] household_area")
+    _check_area_name(household, origins.where("rights", "household_area"))
     for username, area in config.users.items():
         # A personal area named like the shared one would hand the shared area
         # to that user without the household group.
         if area == household:
-            raise ConfigError(f"[users] {username}: {area!r} is the household area")
-    if not 0 < config.index.archive_factor <= 1:
-        raise ConfigError("[index] archive_factor must be in (0, 1]")
-    if config.index.snippet_chars < MIN_SNIPPET_CHARS:
-        raise ConfigError(f"[index] snippet_chars must be at least {MIN_SNIPPET_CHARS}")
+            where = origins.in_file(f"[users] {username}")
+            raise ConfigError(f"{where} is the household area")
 
 
 def load_config(path: str | Path | None = None, env: Mapping[str, str] | None = None) -> Config:
@@ -283,4 +423,4 @@ def load_config(path: str | Path | None = None, env: Mapping[str, str] | None = 
         raise ConfigError(f"cannot read config {chosen}: {exc.strerror}") from None
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"config {chosen} is not valid TOML: {exc}") from None
-    return build_config(raw, env)
+    return build_config(raw, env, chosen)
