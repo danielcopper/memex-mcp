@@ -48,9 +48,9 @@ JWKS_LIFESPAN_SECONDS = 300
 # connection reset while the answer is read, ValueError for an answer that is
 # not JSON, RecursionError for one nested too deeply (how deep depends on the
 # Python build and the stack size; with enough stack such a document parses and
-# fails as not an object), and, out of a key entry, TypeError for an `alg` that
-# is not a string, NotImplementedError for `alg` "none" and KeyError for an
-# `oct` key without `k`. Each fails the whole set.
+# fails like any other malformed set), and, out of a key entry, TypeError for an
+# `alg` that is not a string, NotImplementedError for `alg` "none" and KeyError
+# for an `oct` key without `k`. Each fails the whole set.
 _FETCH_ERRORS = (
     jwt.PyJWTError,
     OSError,
