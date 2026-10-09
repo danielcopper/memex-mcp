@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import socket
@@ -819,6 +821,61 @@ async def test_a_malformed_member_never_escapes(
     assert len(warnings) <= 1
     # A rejection always says why.
     assert verified is not None or len(warnings) == 1
+
+
+# The drift test compares auth.py's signing-key filter with PyJWT's directly, to catch drift on a
+# PyJWT bump; it needs these private names.
+ProviderJwks = memex_mcp.auth._ProviderJwks  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+ENTRY_ERRORS = memex_mcp.auth._ENTRY_ERRORS  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+review = memex_mcp.auth._review  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    ("kty", "member", "value"),
+    FUZZ_CASES,
+    ids=[f"{kty}-{member}-{value}" for kty, member, value in FUZZ_CASES],
+)
+def test_the_signing_keys_are_the_ones_pyjwt_picks(kty: str, member: str, value: str) -> None:
+    """The kids the fetch reports and the keys served from the cache are PyJWT's signing keys.
+
+    The fast path and the review of a fetched set filter the set themselves;
+    this ties both to PyJWT's own filter, so a change of it on a pin bump fails here.
+    """
+    entry = without(FUZZ_BASES[kty], member)
+    if value != MISSING:
+        entry[member] = VALUES[value]
+    document: dict[str, object] = {"keys": [entry, GOOD_JWK]}
+    client = ProviderJwks("http://127.0.0.1/jwks/", timeout=1.0, cooldown=1.0)
+    assert client.jwk_set_cache is not None
+    try:
+        client.jwk_set_cache.put(document)
+    except ENTRY_ERRORS:
+        return  # PyJWT refuses the whole set; a fetch of it fails
+    # Served from the cache just filled, without a fetch.
+    pyjwt_keys = client.get_signing_keys()
+    entries = cast("list[object]", document["keys"])
+    kids, _notes = review(entries)
+    assert list(kids) == [key.key_id for key in pyjwt_keys]
+    for kid in ("k0", "k1", "k9"):
+        assert client.cached_key(kid) is client.match_kid(pyjwt_keys, kid)
+
+
+def test_pyjwt_never_clears_the_cached_key_set() -> None:
+    """The cache is read without the lock, which holds while PyJWT only replaces the set.
+
+    ``put(None)`` would empty the cache while a fetch runs, and a failed fetch
+    would drop a set that is still valid; check this again on every pin bump.
+    """
+    tree = ast.parse(inspect.getsource(jwt.jwks_client))
+    puts = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "put"
+    ]
+    assert puts  # the check below would hold for no call at all
+    assert [ast.unparse(node.args[0]) for node in puts] == ["jwk_set"] * len(puts)
 
 
 HINT = "; is [auth] jwks_url the provider's JWKS endpoint?"
