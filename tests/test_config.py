@@ -419,3 +419,60 @@ def test_a_shown_value_is_escaped_and_cut(tmp_path: Path, value: str, shown: str
     assert len(shown) <= SHOWN_CHARS
     message = _refusal(raw_config(tmp_path), {"MEMEX_SERVER_PORT": value})
     assert message == f"[server] port from MEMEX_SERVER_PORT must be a whole number, got {shown}"
+
+
+URL_SETTINGS = [*HTTPS_URLS, ("embeddings", "url")]
+
+
+def _url_refusal(tmp_path: Path, section: str, key: str, url: str, *, env: bool) -> ConfigError:
+    raw = raw_config(tmp_path)
+    environment: dict[str, str] = {}
+    if env:
+        environment[f"MEMEX_{section.upper()}_{key.upper()}"] = url
+    else:
+        raw[section][key] = url
+    with pytest.raises(ConfigError) as caught:
+        build_config(raw, environment)
+    return caught.value
+
+
+@pytest.mark.parametrize(("section", "key"), URL_SETTINGS)
+@pytest.mark.parametrize(
+    ("url", "problem"),
+    [
+        ("https://u:s3cret@a<b.example.org/", "is not a valid URL"),
+        ("https://u:s3cret@xn--zz.example.org/", "is not a valid URL"),
+        ("https://u:s3cret@auth exa.org/", "contains whitespace or control characters"),
+        ("https://a b/", "contains whitespace or control characters"),
+    ],
+)
+def test_a_url_the_server_cannot_parse_is_refused(
+    tmp_path: Path, section: str, key: str, url: str, problem: str
+) -> None:
+    for env in (False, True):
+        refusal = _url_refusal(tmp_path, section, key, url, env=env)
+        assert str(refusal).startswith(f"[{section}] {key} ")
+        assert str(refusal).endswith(f" {problem}")
+        assert "s3cret" not in str(refusal)
+        assert refusal.__context__ is None
+        assert refusal.__cause__ is None
+
+
+@pytest.mark.parametrize(("section", "key"), URL_SETTINGS)
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://auth.example.org/application/o/memex/\n",
+        " https://auth.example.org/",
+        "https://auth.exa\tmple.org/",
+        "\x01https://auth.example.org/",
+    ],
+    ids=["trailing newline", "leading space", "tab inside", "control prefix"],
+)
+def test_a_url_with_whitespace_or_control_characters_is_refused(
+    tmp_path: Path, section: str, key: str, url: str
+) -> None:
+    for env in (False, True):
+        message = str(_url_refusal(tmp_path, section, key, url, env=env))
+        assert message.endswith(" contains whitespace or control characters")
+        assert "example" not in message

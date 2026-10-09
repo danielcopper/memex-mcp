@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
 from urllib.parse import urlsplit
 
+from pydantic import AnyHttpUrl, ValidationError
+
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
@@ -345,21 +347,41 @@ def build_config(
     return config
 
 
-def _url_problem(url: str, *, https: bool) -> str | None:
-    """What is wrong with ``url``, never quoting it; None when nothing is."""
+def _parses_as_http_url(url: str) -> bool:
+    """Whether pydantic, which the server hands the URLs to, accepts ``url``."""
+    try:
+        AnyHttpUrl(url)
+    except ValidationError:
+        return False
+    return True
+
+
+def _scheme_and_host(url: str) -> tuple[str, str] | None:
+    """The scheme and host of ``url``, or None when urlsplit cannot read it."""
     try:
         parts = urlsplit(url)
-        host = parts.hostname
         _ = parts.port  # raises for a port that is not a number in range
     except ValueError:
+        return None
+    return parts.scheme, parts.hostname or ""
+
+
+def _url_problem(url: str, *, https: bool) -> str | None:
+    """What is wrong with ``url``, never quoting it; None when nothing is."""
+    # urlsplit drops these before it parses; the server uses the URL as given.
+    if any(char.isspace() or not char.isprintable() for char in url):
+        return "contains whitespace or control characters"
+    split = _scheme_and_host(url)
+    if split is None:
         return "is not a valid URL"
-    if parts.scheme not in {"http", "https"}:
+    scheme, host = split
+    if scheme not in {"http", "https"}:
         return "must be an https URL" if https else "must be an http or https URL"
     if not host:
         return "has no host"
-    if https and parts.scheme == "http" and host not in _LOOPBACK_HOSTS:
+    if https and scheme == "http" and host not in _LOOPBACK_HOSTS:
         return "uses http, needs https (http only for localhost)"
-    return None
+    return None if _parses_as_http_url(url) else "is not a valid URL"
 
 
 def _check_urls(config: Config, origins: _Origins) -> None:
