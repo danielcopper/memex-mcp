@@ -151,18 +151,17 @@ class _Bound:
     """The range a number setting must lie in."""
 
     low: float
+    high: float
     above: bool = False  # the value must be greater than `low`, not equal to it
-    high: float | None = None
 
     def holds(self, number: float) -> bool:
-        if number < self.low or (self.above and number == self.low):
-            return False
-        return self.high is None or number <= self.high
+        above_low = number > self.low if self.above else number >= self.low
+        return above_low and number <= self.high
 
     @override
     def __str__(self) -> str:
         low = f"greater than {self.low}" if self.above else f"at least {self.low}"
-        return low if self.high is None else f"{low} and at most {self.high}"
+        return f"{low} and at most {self.high}"
 
 
 # Every number setting has a bound, so that the server refuses to start on a
@@ -236,11 +235,17 @@ class _Origins:
     env: Mapping[str, str]
     source: str | None
 
+    def set_by_env(self, section: str, key: str) -> bool:
+        return _env_name(section, key) in self.env
+
+    def named(self, section: str, key: str) -> str:
+        """The setting, with the environment variable when one set it."""
+        name = f"[{section}] {key}"
+        return f"{name} from {_env_name(section, key)}" if self.set_by_env(section, key) else name
+
     def where(self, section: str, key: str) -> str:
-        env_name = _env_name(section, key)
-        if env_name in self.env:
-            return f"[{section}] {key} from {env_name}"
-        return self.in_file(f"[{section}] {key}")
+        name = self.named(section, key)
+        return name if self.set_by_env(section, key) else self.in_file(name)
 
     def in_file(self, name: str) -> str:
         return name if self.source is None else f"{name} in {self.source}"
@@ -437,7 +442,12 @@ def build_config(
 
 
 def _parses_as_http_url(url: str) -> bool:
-    """Whether pydantic, which the server hands the URLs to, accepts ``url``."""
+    """Whether pydantic's AnyHttpUrl accepts ``url``.
+
+    The server hands public_url and issuer to pydantic; jwks_url goes to
+    PyJWKClient (urllib) and the embeddings url to httpx2, and both are held to
+    the same parse.
+    """
     try:
         AnyHttpUrl(url)
     except ValidationError:
@@ -461,7 +471,7 @@ def _scheme_problem(parts: SplitResult, *, https: bool) -> str | None:
     if not parts.hostname:
         return "has no host"
     if https and parts.scheme == "http" and parts.hostname not in _LOOPBACK_HOSTS:
-        return "uses http, needs https (http only for localhost)"
+        return "uses http, needs https (http only for localhost, 127.0.0.1 or [::1])"
     return None
 
 
@@ -482,7 +492,8 @@ def _url_problem(url: str, *, https: bool, origin: bool = False) -> str | None:
     ``https``: https only, http just to a loopback host, no user or password.
     ``origin``: scheme, host and port only.
     """
-    # urlsplit drops these before it parses; the server uses the URL as given.
+    # Refused outright: urlsplit drops some of these before it parses, while
+    # the server uses the URL as given.
     if _has_space_or_control(url):
         return "contains whitespace or control characters"
     parts = _split(url)
@@ -533,9 +544,14 @@ def _check_required(config: Config, origins: _Origins) -> None:
             ("embeddings", "url", config.embeddings.url),
             ("embeddings", "model", config.embeddings.model),
         ]
-    missing = [origins.where(section, key) for section, key, value in required if not value]
+    missing = [(section, key) for section, key, value in required if not value]
     if missing:
-        raise ConfigError(f"missing required settings: {', '.join(missing)}")
+        # The file is named once, for the settings no variable emptied.
+        head = "missing required settings"
+        if not all(origins.set_by_env(*setting) for setting in missing):
+            head = origins.in_file(head)
+        names = ", ".join(origins.named(*setting) for setting in missing)
+        raise ConfigError(f"{head}: {names}")
 
 
 def _check_algorithms(config: Config, origins: _Origins) -> None:
@@ -575,8 +591,9 @@ def _validate(config: Config, origins: _Origins) -> None:
         raise ConfigError(f"{where} must be a logging level such as INFO or DEBUG")
     household = config.rights.household_area
     _check_area_name(household, origins.where("rights", "household_area"))
-    household_env = _env_name("rights", "household_area")
-    set_by = f" set by {household_env}" if household_env in origins.env else ""
+    set_by = ""
+    if origins.set_by_env("rights", "household_area"):
+        set_by = f" set by {_env_name('rights', 'household_area')}"
     for username, area in config.users.items():
         # A personal area named like the shared one would hand the shared area
         # to that user without the household group.

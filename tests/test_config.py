@@ -323,8 +323,14 @@ def test_https_urls_accept_https_and_loopback_http(
         ("ftp://auth.example.org/", "must be an https URL"),
         ("https:///application/o/memex/", "has no host"),
         ("https://", "has no host"),
-        ("http://auth.example.org/", "uses http, needs https (http only for localhost)"),
-        ("http://127.0.0.2/", "uses http, needs https (http only for localhost)"),
+        (
+            "http://auth.example.org/",
+            "uses http, needs https (http only for localhost, 127.0.0.1 or [::1])",
+        ),
+        (
+            "http://127.0.0.2/",
+            "uses http, needs https (http only for localhost, 127.0.0.1 or [::1])",
+        ),
         ("https://[::1/", "is not a valid URL"),
         ("https://auth.example.org:99999/", "is not a valid URL"),
     ],
@@ -378,7 +384,7 @@ def test_a_refused_url_is_never_shown(tmp_path: Path, section: str, key: str, ur
         _refusal(raw_config(tmp_path), {env_name: url}),
     ):
         assert message.startswith(f"[{section}] {key} ")
-        for part in ("user", "secret", "example.org", "::1"):
+        for part in ("user", "secret", "example.org", "[::1/"):
             assert part not in message
 
 
@@ -413,7 +419,8 @@ def test_a_refusal_names_the_file_or_the_variable(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as caught:
         load_config(EXAMPLE, env={"MEMEX_AUTH_ISSUER": "http://auth.example.org/"})
     assert str(caught.value) == (
-        "[auth] issuer from MEMEX_AUTH_ISSUER uses http, needs https (http only for localhost)"
+        "[auth] issuer from MEMEX_AUTH_ISSUER uses http, needs https"
+        " (http only for localhost, 127.0.0.1 or [::1])"
     )
 
 
@@ -558,7 +565,13 @@ def test_a_missing_setting_names_its_origin(tmp_path: Path) -> None:
     path = _example_with(tmp_path, 'path = "/data/clone"\n', "")
     with pytest.raises(ConfigError) as caught:
         load_config(path, env={})
-    assert str(caught.value) == f"missing required settings: [repo] path in {path}"
+    assert str(caught.value) == f"missing required settings in {path}: [repo] path"
+    with pytest.raises(ConfigError) as caught:
+        load_config(path, env={"MEMEX_SERVER_PUBLIC_URL": ""})
+    assert str(caught.value) == (
+        f"missing required settings in {path}: "
+        "[server] public_url from MEMEX_SERVER_PUBLIC_URL, [repo] path"
+    )
 
 
 def test_key_names_are_escaped_and_cut(tmp_path: Path) -> None:
