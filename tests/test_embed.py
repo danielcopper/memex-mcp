@@ -17,6 +17,10 @@ def raw_answer(body: bytes) -> httpx2.Response:
     return httpx2.Response(200, content=body, headers={"content-type": "application/json"})
 
 
+# A closed document, so that nothing but the depth can fail it.
+NESTED_TOO_DEEPLY = b"[" * 100_000 + b"]" * 100_000
+
+
 def embedder(handler: httpx2.MockTransport) -> OllamaEmbedder:
     return OllamaEmbedder("http://ollama.example.org:11434/", "bge-m3", 3, transport=handler)
 
@@ -60,6 +64,7 @@ def test_embeds_a_batch_in_order() -> None:
         httpx2.Response(200, json={"embeddings": [[1e-46, 0, 0]]}),
         httpx2.Response(200, json={"embeddings": [[1.9e19, 0, 0]]}),
         httpx2.Response(200, json={"model": "bge-m3", "error": "no such route"}),
+        raw_answer(NESTED_TOO_DEEPLY),
     ],
     ids=[
         "http-500",
@@ -83,6 +88,7 @@ def test_embeds_a_batch_in_order() -> None:
         "vector-subnormal",
         "vector-too-long",
         "no-embeddings-member",
+        "nested-too-deeply",
     ],
 )
 def test_bad_answers_raise_embedding_error(response: httpx2.Response) -> None:
@@ -130,6 +136,7 @@ def test_bad_answers_raise_embedding_error(response: httpx2.Response) -> None:
             ["a"],
             "vector 0 is too long: its squared length overflows float32",
         ),
+        (raw_answer(NESTED_TOO_DEEPLY), ["a"], "the answer is nested too deeply"),
         (
             httpx2.Response(200, json={"model": "bge-m3", "error": "no such route"}),
             ["a"],
@@ -147,6 +154,7 @@ def test_bad_answers_raise_embedding_error(response: httpx2.Response) -> None:
         "zero",
         "near-zero",
         "too-long",
+        "nested-too-deeply",
         "no-embeddings-member",
     ],
 )
@@ -199,10 +207,7 @@ OLLAMA_ERROR = 'model "bge-m3" not found, try pulling it first'
         (httpx2.Response(500, text="model not loaded"), "HTTP 500 Internal Server Error"),
         (httpx2.Response(500, json={"error": 5}), "HTTP 500 Internal Server Error"),
         (httpx2.Response(500, json=["error"]), "HTTP 500 Internal Server Error"),
-        (
-            httpx2.Response(500, content=b"[" * 100_000 + b"]" * 100_000),
-            "HTTP 500 Internal Server Error",
-        ),
+        (httpx2.Response(500, content=NESTED_TOO_DEEPLY), "HTTP 500 Internal Server Error"),
     ],
     ids=[
         "model-missing",
@@ -216,6 +221,33 @@ OLLAMA_ERROR = 'model "bge-m3" not found, try pulling it first'
 def test_an_error_status_carries_ollamas_own_error_text(
     response: httpx2.Response, message: str
 ) -> None:
+    assert message_for(response) == message
+
+
+LOCATION = "http://ollama.example.org:11434/api/embed/"
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        (
+            httpx2.Response(500, extensions={"reason_phrase": b"\x1b[31mforged" + b"x" * 1000}),
+            "HTTP 500 Internal Server Error",
+        ),
+        (httpx2.Response(599), "HTTP 599"),
+        (
+            httpx2.Response(308, headers={"location": LOCATION}),
+            f"HTTP 308 Permanent Redirect; redirected to {LOCATION!r}",
+        ),
+        (
+            httpx2.Response(302, headers={"location": "/x'\\" + "y" * 300}),
+            "HTTP 302 Found; redirected to " + repr("/x'\\" + "y" * 196 + "…"),
+        ),
+        (httpx2.Response(304), "HTTP 304 Not Modified"),
+    ],
+    ids=["server-phrase", "unknown-code", "redirect", "redirect-escaped-and-cut", "no-location"],
+)
+def test_an_error_status_is_named_by_its_code(response: httpx2.Response, message: str) -> None:
     assert message_for(response) == message
 
 

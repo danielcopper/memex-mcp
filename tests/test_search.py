@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
+import httpx2
 import pytest
 
 from memex_mcp.embed import Embedder
@@ -24,6 +25,8 @@ from tests.conftest import (
     Origin,
     make_config,
     malformed_ollama,
+    nested_too_deeply,
+    null_vectors,
 )
 
 
@@ -141,8 +144,13 @@ def test_after_a_failure_the_embedder_rests_for_a_while(tmp_path: Path, origin: 
         memex.index.close()
 
 
-def test_a_malformed_embedder_answer_falls_back_to_keywords(tmp_path: Path, origin: Origin) -> None:
-    embedder = malformed_ollama()
+@pytest.mark.parametrize(
+    "answer", [null_vectors, nested_too_deeply], ids=["null vectors", "nested too deeply"]
+)
+def test_a_malformed_embedder_answer_falls_back_to_keywords(
+    tmp_path: Path, origin: Origin, answer: Callable[[list[str]], httpx2.Response]
+) -> None:
+    embedder = malformed_ollama(answer)
     memex = service(tmp_path, origin, embedder)
     try:
         result = memex.search(ALICE, "degreaser")

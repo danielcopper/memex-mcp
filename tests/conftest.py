@@ -6,7 +6,7 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast, override
@@ -198,13 +198,25 @@ class FailingEmbedder(Embedder):
         raise EmbeddingError(self.message)
 
 
-def malformed_ollama() -> OllamaEmbedder:
-    """Ollama on a mocked transport that answers every text with a vector of nulls."""
+def null_vectors(texts: list[str]) -> httpx2.Response:
+    """An answer with a vector of nulls for every text."""
+    return httpx2.Response(
+        200, json={"embeddings": [[None] * FakeEmbedder.dimensions for _ in texts]}
+    )
+
+
+def nested_too_deeply(_texts: list[str]) -> httpx2.Response:
+    """An answer nested deeper than Python's json module can parse."""
+    return httpx2.Response(200, content=b"[" * 100_000 + b"]" * 100_000)
+
+
+def malformed_ollama(
+    answer: Callable[[list[str]], httpx2.Response] = null_vectors,
+) -> OllamaEmbedder:
+    """Ollama on a mocked transport that gives every request a malformed answer."""
 
     def handler(request: httpx2.Request) -> httpx2.Response:
-        texts = cast("dict[str, list[str]]", json.loads(request.content))["input"]
-        vectors = [[None] * FakeEmbedder.dimensions for _ in texts]
-        return httpx2.Response(200, json={"embeddings": vectors})
+        return answer(cast("dict[str, list[str]]", json.loads(request.content))["input"])
 
     return OllamaEmbedder(
         "http://ollama.example.org:11434",

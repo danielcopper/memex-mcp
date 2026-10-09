@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from http import HTTPStatus
 from typing import Protocol, cast
 
 import httpx2
@@ -17,10 +18,12 @@ _FLOAT32_MAX = 3.4028234663852886e38
 # is refused with a wide margin.
 _MIN_SQUARED_LENGTH = 1e-12
 # A squared length beyond float32 overflows there, and the distance to every
-# vector becomes a flat 1.0, which sorts last.
+# vector becomes a flat 1.0 (cosine distance runs from 0 to 2), as if the
+# vector were orthogonal to all of them.
 _MAX_SQUARED_LENGTH = _FLOAT32_MAX
 # An error message names at most this many of the answer's members, each cut
-# to this many characters, and carries at most this much of Ollama's own error text.
+# to this many characters, and carries at most this much of Ollama's own error
+# text or of a redirect's target.
 _MEMBER_NAMES = 10
 _NAME_CHARS = 64
 _ERROR_CHARS = 200
@@ -82,6 +85,22 @@ def _ollama_says(response: httpx2.Response) -> str:
     return f"; Ollama says {_clip(error, _ERROR_CHARS)}" if isinstance(error, str) else ""
 
 
+def _status(response: httpx2.Response) -> str:
+    """``HTTP <code> <phrase>`` for an error answer, plus where a redirect points.
+
+    The phrase comes from the code, never from the server.
+    """
+    try:
+        phrase = HTTPStatus(response.status_code).phrase
+    except ValueError:  # a code HTTP does not define
+        phrase = ""
+    status = f"HTTP {response.status_code} {phrase}".rstrip()
+    location = response.headers.get("location")
+    if response.is_redirect and location is not None:
+        status += f"; redirected to {_clip(location, _ERROR_CHARS)}"
+    return status
+
+
 def _member_names(members: dict[str, object]) -> str:
     """The answer's member names for a message, escaped, cut and counted."""
     names = sorted(members)
@@ -116,10 +135,11 @@ class OllamaEmbedder:
             response.raise_for_status()
             payload = cast("object", response.json())
         except httpx2.HTTPStatusError as exc:
-            status = f"HTTP {exc.response.status_code} {exc.response.reason_phrase}"
-            raise EmbeddingError(f"{status}{_ollama_says(exc.response)}") from exc
+            raise EmbeddingError(f"{_status(exc.response)}{_ollama_says(exc.response)}") from exc
         except (httpx2.HTTPError, ValueError) as exc:
             raise EmbeddingError(f"{type(exc).__name__}: {exc}") from exc
+        except RecursionError as exc:
+            raise EmbeddingError("the answer is nested too deeply") from exc
         # A JSON object's keys are strings.
         if not isinstance(payload, dict):
             raise EmbeddingError(f"the answer is {json_kind(payload)}, not an object")
