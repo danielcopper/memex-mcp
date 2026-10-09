@@ -656,3 +656,39 @@ def test_a_branch_that_git_would_read_as_an_option_is_refused(tmp_path: Path, br
     assert _refusal(raw_config(tmp_path), {"MEMEX_REPO_BRANCH": branch}) == (
         "[repo] branch from MEMEX_REPO_BRANCH must not start with '-'"
     )
+
+
+def test_an_environment_variable_no_setting_reads_is_refused(tmp_path: Path) -> None:
+    env = {"MEMEX_SERVER_PROT": "s3cret", "MEMEX_EMBEDDINGS_ENABLE": "false"}
+    message = _refusal(raw_config(tmp_path), env)
+    assert message == (
+        "unknown environment variables: 'MEMEX_EMBEDDINGS_ENABLE', 'MEMEX_SERVER_PROT'"
+    )
+    assert "s3cret" not in message
+    message = _refusal(raw_config(tmp_path), {"MEMEX_USERS_ALICE": "alice"})
+    assert message == "[users] lives in the file only, not in 'MEMEX_USERS_ALICE'"
+    message = _refusal(raw_config(tmp_path), {"MEMEX_\x1b[2J": ""})
+    assert message == r"unknown environment variables: 'MEMEX_\x1b[2J'"
+
+
+def test_the_environment_may_name_the_file_and_carry_other_variables(tmp_path: Path) -> None:
+    env = {"MEMEX_CONFIG": str(EXAMPLE), "MEMEXX_PORT": "1", "PATH": "/usr/bin", "memex_x": "1"}
+    assert build_config(raw_config(tmp_path), env).server.port == 8000
+
+
+def _as_env_text(value: object) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, tuple):
+        return ",".join(cast("tuple[str, ...]", value))
+    return str(value)
+
+
+def test_every_setting_reads_its_environment_variable(tmp_path: Path) -> None:
+    built = _settings(build_config(raw_config(tmp_path), {}))
+    for section, values in built.items():
+        if section == "users":
+            continue
+        for key, value in values.items():
+            env = {f"MEMEX_{section.upper()}_{key.upper()}": _as_env_text(value)}
+            assert _settings(build_config(raw_config(tmp_path), env)) == built

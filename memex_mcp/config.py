@@ -196,6 +196,20 @@ def _env_name(section: str, key: str) -> str:
     return f"{ENV_PREFIX}{section.upper()}_{key.upper()}"
 
 
+def _setting_env_names() -> frozenset[str]:
+    defaults = Config()
+    return frozenset(
+        _env_name(section, f.name)
+        for section in _SECTIONS - {"users"}
+        for f in fields(cast("DataclassInstance", getattr(defaults, section)))
+    )
+
+
+# The environment variables the configuration reads: one per setting, and the
+# one naming the file. Any other MEMEX_ variable is a typo or a stray.
+_ENV_NAMES = _setting_env_names() | {CONFIG_ENV}
+
+
 @dataclass(frozen=True)
 class _Origins:
     """Where the settings came from, for refusals that name a setting.
@@ -365,6 +379,16 @@ def _users(raw: Mapping[str, object], origins: _Origins) -> dict[str, str]:
     return users
 
 
+def _check_env_names(env: Mapping[str, str]) -> None:
+    """Refuse a MEMEX_ variable no setting reads, naming it but never its value."""
+    unknown = sorted(name for name in env if name.startswith(ENV_PREFIX) and name not in _ENV_NAMES)
+    users = [name for name in unknown if name.startswith(_env_name("users", ""))]
+    if users:
+        raise ConfigError(f"[users] lives in the file only, not in {', '.join(map(_key, users))}")
+    if unknown:
+        raise ConfigError(f"unknown environment variables: {', '.join(map(_key, unknown))}")
+
+
 def build_config(
     raw: Mapping[str, object], env: Mapping[str, str], source: str | Path | None = None
 ) -> Config:
@@ -373,6 +397,7 @@ def build_config(
     ``source`` names the file ``raw`` was read from, for the refusals.
     """
     origins = _Origins(env, None if source is None else str(source))
+    _check_env_names(env)
     unknown = set(raw) - _SECTIONS
     if unknown:
         where = origins.in_file("unknown sections")
