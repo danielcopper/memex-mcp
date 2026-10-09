@@ -285,15 +285,26 @@ def _coerce_strings(where: str, value: object) -> tuple[str, ...]:
     raise ConfigError(f"{where} must be a list of strings")
 
 
+def _refuse_quoted(where: str, value: object, default: object) -> None:
+    """Refuse a quoted number or boolean in the file; only the environment gives strings."""
+    if not isinstance(value, str) or not isinstance(default, bool | int | float):
+        return
+    if isinstance(default, bool):
+        kind = "a boolean"
+    else:
+        kind = "a whole number" if isinstance(default, int) else "a number"
+    raise ConfigError(f"{where} must be {kind} without quotes, got {_shown(value)}")
+
+
 def _coerce(section: str, key: str, where: str, value: object, default: object) -> object:
     if isinstance(default, bool):
         return _coerce_bool(where, value)
     if isinstance(default, int | float):
         # TOML and the environment give strings, numbers, booleans, lists,
-        # tables and dates. A whole-number setting takes an integer or a string
-        # of one, never a float; any other number setting takes an integer, a
-        # float or a string of either. Neither takes a boolean, though Python
-        # counts it as an int.
+        # tables and dates; a string here came from the environment. A
+        # whole-number setting takes an integer or a string of one, never a
+        # float; any other number setting takes an integer, a float or a string
+        # of either. Neither takes a boolean, though Python counts it as an int.
         number = (
             _coerce_int(where, value) if isinstance(default, int) else _coerce_float(where, value)
         )
@@ -329,6 +340,7 @@ def _section[S: DataclassInstance](
         if env_name in origins.env:
             values[f.name] = _coerce(name, f.name, where, origins.env[env_name], default)
         elif f.name in table:
+            _refuse_quoted(where, table[f.name], default)
             values[f.name] = _coerce(name, f.name, where, table[f.name], default)
     return replace(defaults, **values)
 

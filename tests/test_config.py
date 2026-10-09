@@ -599,3 +599,22 @@ def test_a_file_tomllib_cannot_decode_is_refused(
     with pytest.raises(ConfigError) as caught:
         load_config(path, env={})
     assert str(caught.value) == f"config {path} {problem}"
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "kind", "read"),
+    [
+        (("server", "port"), "8000", "a whole number", 8000),
+        (("auth", "timeout_seconds"), "5", "a number", 5.0),
+        (("embeddings", "enabled"), "false", "a boolean", False),
+    ],
+)
+def test_a_quoted_number_or_boolean_comes_only_from_the_environment(
+    tmp_path: Path, setting: tuple[str, str], value: str, kind: str, read: object
+) -> None:
+    section, key = setting
+    raw = raw_config(tmp_path)
+    raw[section][key] = value
+    assert _refusal(raw) == f"[{section}] {key} must be {kind} without quotes, got {value!r}"
+    env_name = f"MEMEX_{section.upper()}_{key.upper()}"
+    assert _settings(build_config(raw_config(tmp_path), {env_name: value}))[section][key] == read
