@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0](https://github.com/danielcopper/memex-mcp/compare/v0.1.3...v0.2.0) (2026-10-10)
+
+
+### Features
+
+* report the embedder and the clone's refresh in /healthz ([#20](https://github.com/danielcopper/memex-mcp/issues/20)) ([5cca94f](https://github.com/danielcopper/memex-mcp/commit/5cca94f149e9c3901103c55b874787c405b70531))
+
+
+### Bug Fixes
+
+* keep the clone remote's password out of git errors ([#16](https://github.com/danielcopper/memex-mcp/issues/16)) ([8511220](https://github.com/danielcopper/memex-mcp/commit/8511220320e5be55d9f6ce2cde26177d327882b5))
+* read the embedding answer within a size limit and a total deadline ([#19](https://github.com/danielcopper/memex-mcp/issues/19)) ([89c0048](https://github.com/danielcopper/memex-mcp/commit/89c00488c219ec03d9be2fc7e62259a3ba48f2c5))
+
 ## [0.1.3](https://github.com/danielcopper/memex-mcp/compare/v0.1.2...v0.1.3) (2026-10-10)
 
 
