@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import sqlite3
 import time
 from collections.abc import Iterator
 from contextlib import closing
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -210,6 +212,92 @@ def test_git_errors_hide_credentials(tmp_path: Path) -> None:
     with pytest.raises(GitError) as error:
         repo.clone("https://bot:s3cret@127.0.0.1:9/memex.git")
     assert "s3cret" not in str(error.value)
+
+
+REDACTED: dict[str, tuple[str, str]] = {
+    "user and token": (
+        "https://bot:s3cret@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "slash in the password": (
+        "https://bot:s3/cret@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "question mark in the password": (
+        "https://bot:s3?cret@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "hash in the password": (
+        "https://bot:s3#cret@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "slash and quote in the password": (
+        "https://bot:s3/cr'et@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "at sign in the password": (
+        "https://bot:s3@cret@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "percent-encoded slash in the password": (
+        "https://bot:s3%2Fcret@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "two urls on one line": (
+        "from https://bot:s3/cret@one.example.org/a to https://bot:t0ken@two.example.org/b",
+        "from https://***@one.example.org/a to https://***@two.example.org/b",
+    ),
+    "no credential": (
+        "https://git.example.org/memex.git",
+        "https://git.example.org/memex.git",
+    ),
+    "at sign in the path": (
+        "https://git.example.org/a@b/memex.git",
+        "https://***@b/memex.git",
+    ),
+    "git's error message": (
+        "fatal: unable to access 'https://bot:s3/cret@127.0.0.1:9/memex.git/': URL rejected: "
+        + "Port number was not a decimal number between 0 and 65535",
+        "fatal: unable to access 'https://***@127.0.0.1:9/memex.git/': URL rejected: "
+        + "Port number was not a decimal number between 0 and 65535",
+    ),
+}
+
+
+@pytest.mark.parametrize(("text", "expected"), REDACTED.values(), ids=list(REDACTED))
+def test_redact_replaces_each_url_up_to_its_last_at_sign(text: str, expected: str) -> None:
+    assert redact(text) == expected
+
+
+def test_redact_is_fast_on_a_long_token_without_an_at_sign() -> None:
+    # The remote's server could send such a line; a quadratic scan takes seconds on it.
+    token = "https://x" * 30_000
+    started = time.monotonic()
+    assert redact(token) == token
+    assert time.monotonic() - started < 5.0
+
+
+def test_git_errors_hide_a_password_with_a_slash(tmp_path: Path) -> None:
+    # git keeps a URL whose password has a slash whole in its message; curl rejects this one.
+    repo = GitRepo(tmp_path / "clone", "main", 10.0)
+    with pytest.raises(GitError) as error:
+        repo.clone("https://bot:s3/cret@127.0.0.1:9/memex.git")
+    assert "cret" not in str(error.value)
+
+
+def test_a_timed_out_git_call_keeps_the_remote_out_of_the_error(tmp_path: Path) -> None:
+    # A listener that never accepts: git connects, sends its request and waits.
+    with socket.create_server(("127.0.0.1", 0)) as listener:
+        port = cast("int", listener.getsockname()[1])
+        repo = GitRepo(tmp_path / "clone", "main", 0.5)
+        with pytest.raises(GitError, match="timed out") as error:
+            repo.clone(f"http://bot:s3cret@127.0.0.1:{port}/memex.git")
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    chained: BaseException | None = error.value
+    while chained is not None:
+        assert "s3cret" not in f"{chained!s} {chained!r}"
+        chained = chained.__cause__ or chained.__context__
 
 
 def _commit_undecodable_name(origin: Origin) -> str:
