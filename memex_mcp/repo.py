@@ -199,7 +199,10 @@ class GitRepo:
     def conflict_branches(self) -> list[str]:
         """The server's conflict branches on the remote, as last fetched."""
         out = self._git(
-            "for-each-ref", "--format=%(refname:lstrip=3)", f"refs/remotes/origin/{CONFLICT_PREFIX}"
+            "for-each-ref",
+            "--format=%(refname:lstrip=3)",
+            # A pattern without a glob matches only up to a slash.
+            f"refs/remotes/origin/{CONFLICT_PREFIX}*",
         )
         return [name for name in out.splitlines() if name]
 

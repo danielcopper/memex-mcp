@@ -299,3 +299,74 @@ async def test_background_loop_reports_a_failing_embedder_and_fetch(
             body = cast("object", (await client.get("/healthz")).json())
             await anyio.sleep(0.05)
         assert body == wanted
+
+
+@pytest.mark.anyio
+async def test_a_write_over_http_commits_for_the_caller(tmp_path: Path, origin: Origin) -> None:
+    async with serving(tmp_path, origin) as (client, memex):
+        bob = token(preferred_username="bob")
+        sections = await call(client, bob, "index_sections", path="household/memory")
+        assert sections["structuredContent"] == {
+            "index": "household/memory/MEMORY.md",
+            "exists": False,
+            "sections": [],
+        }
+        result = await call(
+            client,
+            bob,
+            "create",
+            path="household/memory/bins.md",
+            content="# Bins\n\nTuesday\n",
+            index_section="House",
+            index_line="bin days",
+        )
+        assert result["isError"] is False
+        written = result["structuredContent"]
+        assert written["pushed"] is True
+        assert written["commit"] == git(origin.bare, "rev-parse", "main").strip()
+        assert git(origin.bare, "log", "-1", "--format=%an %s", "main").strip() == (
+            "bob memex-mcp: 2 files in household/memory"
+        )
+        read = await call(client, bob, "read", path="household/memory/bins.md")
+        assert read["structuredContent"]["version"] == written["version"]
+        assert memex.health()["repo"] == "ok"
+
+
+@pytest.mark.anyio
+async def test_foreign_and_missing_notes_refuse_writes_alike_over_http(
+    tmp_path: Path, origin: Origin
+) -> None:
+    async with serve(tmp_path, origin) as client:
+        alice = token()
+        head = git(origin.bare, "rev-parse", "main")
+        answers = [
+            await call(client, alice, "append", path=path, text="more")
+            for path in ("bob/memory/zebra.md", "bob/memory/no-such-note.md")
+        ]
+        answers.append(
+            await call(
+                client,
+                alice,
+                "create",
+                path="bob/memory/zebra.md",
+                content="# x\n",
+                index_section="S",
+                index_line="l",
+            )
+        )
+        assert all(answer == answers[0] for answer in answers)
+        assert answers[0]["isError"] is True
+        assert answers[0]["content"][0]["text"] == "no such note"
+        assert git(origin.bare, "rev-parse", "main") == head
+
+
+@pytest.mark.anyio
+async def test_health_reads_conflict_while_a_conflict_branch_exists(
+    tmp_path: Path, origin: Origin
+) -> None:
+    async with serving(tmp_path, origin) as (client, memex):
+        git(origin.bare, "branch", "conflict/memex-mcp-2026-01-01", "main")
+        memex.refresh_round(first=False)
+        response = await client.get("/healthz")
+        assert response.status_code == 200
+        assert '"repo":"conflict"' in response.text
