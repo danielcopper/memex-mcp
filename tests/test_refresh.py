@@ -212,6 +212,77 @@ def test_git_errors_hide_credentials(tmp_path: Path) -> None:
     assert "s3cret" not in str(error.value)
 
 
+REDACTED: dict[str, tuple[str, str]] = {
+    "user and token": (
+        "https://bot:s3cret@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "slash in the password": (
+        "https://bot:s3/cret@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "question mark in the password": (
+        "https://bot:s3?cret@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "hash in the password": (
+        "https://bot:s3#cret@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "slash and quote in the password": (
+        "https://bot:s3/cr'et@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "at sign in the password": (
+        "https://bot:s3@cret@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "percent-encoded slash in the password": (
+        "https://bot:s3%2Fcret@git.example.org/memex.git",
+        "https://***@git.example.org/memex.git",
+    ),
+    "two urls on one line": (
+        "from https://bot:s3/cret@one.example.org/a to https://bot:t0ken@two.example.org/b",
+        "from https://***@one.example.org/a to https://***@two.example.org/b",
+    ),
+    "no credential": (
+        "https://git.example.org/memex.git",
+        "https://git.example.org/memex.git",
+    ),
+    "at sign in the path": (
+        "https://git.example.org/a@b/memex.git",
+        "https://***@b/memex.git",
+    ),
+    "git's error message": (
+        "fatal: unable to access 'https://bot:s3/cret@127.0.0.1:9/memex.git/': URL rejected: "
+        + "Port number was not a decimal number between 0 and 65535",
+        "fatal: unable to access 'https://***@127.0.0.1:9/memex.git/': URL rejected: "
+        + "Port number was not a decimal number between 0 and 65535",
+    ),
+}
+
+
+@pytest.mark.parametrize(("text", "expected"), REDACTED.values(), ids=list(REDACTED))
+def test_redact_replaces_each_url_up_to_its_last_at_sign(text: str, expected: str) -> None:
+    assert redact(text) == expected
+
+
+def test_redact_is_fast_on_a_long_token_without_an_at_sign() -> None:
+    # The remote's server could send such a line; a quadratic scan takes seconds on it.
+    token = "https://x" * 30_000
+    started = time.monotonic()
+    assert redact(token) == token
+    assert time.monotonic() - started < 5.0
+
+
+def test_git_errors_hide_a_password_with_a_slash(tmp_path: Path) -> None:
+    # git keeps a URL whose password has a slash whole in its message; curl rejects this one.
+    repo = GitRepo(tmp_path / "clone", "main", 10.0)
+    with pytest.raises(GitError) as error:
+        repo.clone("https://bot:s3/cret@127.0.0.1:9/memex.git")
+    assert "cret" not in str(error.value)
+
+
 def _commit_undecodable_name(origin: Origin) -> str:
     """A writer commits a note whose file name is not UTF-8, next to a good one."""
     # os.fsdecode turns the byte 0xff into a surrogate, the way os.walk reports it.

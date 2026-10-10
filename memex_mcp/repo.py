@@ -8,12 +8,28 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-_CREDENTIAL = re.compile(r"(://)[^/@\s]+@")
+# Not the shorter ``://\S*@``: on a long token with many ``://`` and no ``@``
+# it rescans the token from each ``://``, which takes quadratic time.
+_URL_TAIL = re.compile(r"://\S*")
+
+
+def _hide_credential(match: re.Match[str]) -> str:
+    tail = match[0]
+    if "@" not in tail:
+        return tail
+    return "://***@" + tail.rpartition("@")[2]
 
 
 def redact(text: str) -> str:
-    """Hide a credential embedded in a remote URL (``https://user:token@host``)."""
-    return _CREDENTIAL.sub(r"\1***@", text)
+    """Hide a credential embedded in a remote URL (``https://user:token@host``).
+
+    Everything from ``://`` up to the last ``@`` before the next whitespace
+    becomes ``***``, so the credential may hold any character but whitespace
+    (``/`` and ``@`` too). The price: any later ``@`` before the next
+    whitespace, in the path or in text glued to the URL, hides what lies
+    before it too (``https://host/a@b/r.git`` becomes ``https://***@b/r.git``).
+    """
+    return _URL_TAIL.sub(_hide_credential, text)
 
 
 class GitError(Exception):
