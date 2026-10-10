@@ -90,6 +90,15 @@ retry_after_seconds = 60.0
 # Whole number, 1 to 2147483647.
 batch_size = 32
 
+[write]
+# A note may hold at most this many bytes after a write through the server;
+# a write that would make it larger is refused. Whole number, 1 to 2147483647.
+max_note_bytes = 65536
+# The commit author's e-mail address for a write; "{username}" becomes the
+# caller's username, with every character other than letters, digits and
+# . _ + - replaced by "-". Not empty, no whitespace or control characters.
+author_email = "{username}@memex.invalid"
+
 # Authentik username (preferred_username) -> the user's own area directory.
 [users]
 alice = "alice"

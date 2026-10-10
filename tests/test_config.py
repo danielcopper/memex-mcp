@@ -233,6 +233,7 @@ BOUNDS: dict[tuple[str, str], tuple[list[float], list[float], str]] = {
         f"at least 0 and {SECONDS}",
     ),
     ("embeddings", "batch_size"): ([1, 2**31 - 1], [0, 2**31], f"at least 1 and {WHOLE}"),
+    ("write", "max_note_bytes"): ([1, 2**31 - 1], [0, 2**31], f"at least 1 and {WHOLE}"),
 }
 
 

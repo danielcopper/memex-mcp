@@ -10,11 +10,11 @@ import httpx2
 import pytest
 
 from memex_mcp.embed import Embedder
+from memex_mcp.rights import InvalidRequest
 from memex_mcp.service import (
     ELLIPSIS,
     NOTICE_DISABLED,
     NOTICE_UNAVAILABLE,
-    InvalidRequest,
     Memex,
     SearchResult,
     make_snippet,

@@ -45,6 +45,20 @@ def title_of(text: str, fallback: str) -> str:
     return fallback
 
 
+def headings(lines: list[str]) -> list[tuple[int, int, str]]:
+    """Each ATX heading outside code fences as (line number, level, text), in order."""
+    found: list[tuple[int, int, str]] = []
+    in_fence = False
+    for number, line in enumerate(lines):
+        if _FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        heading = None if in_fence else _heading(line)
+        if heading is not None:
+            found.append((number, *heading))
+    return found
+
+
 def _sections(text: str) -> list[tuple[str, str]]:
     sections: list[tuple[str, str]] = []
     heading = ""

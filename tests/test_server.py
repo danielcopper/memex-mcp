@@ -133,14 +133,33 @@ async def test_health_needs_no_token(tmp_path: Path, origin: Origin) -> None:
         assert response.json() == {"status": "ok", "embeddings": "disabled", "repo": "ok"}
 
 
+# Each tool's hints: read-only, destructive, idempotent (None where a read-only tool has none).
+TOOL_HINTS: dict[str, tuple[bool, bool, bool | None]] = {
+    "search": (True, False, None),
+    "read": (True, False, None),
+    "list": (True, False, None),
+    "areas": (True, False, None),
+    "index_sections": (True, False, None),
+    "create": (False, False, False),
+    "append": (False, False, False),
+    "edit": (False, True, False),
+    "delete": (False, True, False),
+}
+
+
 @pytest.mark.anyio
-async def test_tools_are_listed_read_only(tmp_path: Path, origin: Origin) -> None:
+async def test_tools_are_listed_with_their_hints(tmp_path: Path, origin: Origin) -> None:
     async with serve(tmp_path, origin) as client:
         response = await rpc(client, "tools/list", bearer=token())
         listed = cast("list[ListedTool]", response.json()["result"]["tools"])
         tools = {tool["name"]: tool for tool in listed}
-        assert set(tools) == {"search", "read", "list", "areas"}
-        assert all(tool["annotations"]["readOnlyHint"] is True for tool in tools.values())
+        assert set(tools) == set(TOOL_HINTS)
+        for name, (read_only, destructive, idempotent) in TOOL_HINTS.items():
+            hints = tools[name]["annotations"]
+            assert hints["readOnlyHint"] is read_only, name
+            assert hints["destructiveHint"] is destructive, name
+            assert hints.get("idempotentHint") is idempotent, name
+            assert hints["openWorldHint"] is False, name
 
 
 @pytest.mark.anyio

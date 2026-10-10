@@ -13,16 +13,36 @@ The rules (v1, no admin override):
   hidden segment (``.git``, ``.obsidian``); after following symlinks it must
   still lie inside the same area and pass the same checks.
 - What the caller cannot see answers exactly like what does not exist.
+
+Writing follows the same rules, plus these: a caller writes exactly where
+they read, and only below ``<area>/memory/`` or ``<area>/wiki/``; no write
+creates, changes or deletes ``CLAUDE.md`` or ``AGENTS.md`` in any folder or
+an index file (``MEMORY.md``, ``_index.md``, ``_master-index.md``), which
+change only through the index line ``create`` adds; and no write follows a
+symlink anywhere on its path.
 """
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from memex_mcp.config import Config
 
 NOTE_SUFFIX = ".md"
+
+# The folders directly inside an area that writes may go into.
+WRITABLE_FOLDERS = frozenset({"memory", "wiki"})
+# Loaded into every assistant session that opens the folder: never written through the server.
+PROTECTED_NAMES = frozenset({"CLAUDE.md", "AGENTS.md"})
+# Changed only by the index line that create adds.
+INDEX_NAMES = frozenset({"MEMORY.md", "_index.md", "_master-index.md"})
+# A writable note's path has its area, memory or wiki, and at least the file name.
+_MIN_WRITE_SEGMENTS = 3
+
+type WriteOperation = Literal["create", "append", "edit", "delete"]
 
 
 # The one answer when the caller has no access at all, whichever setting is
@@ -35,6 +55,14 @@ class AccessDenied(Exception):
 
     Its messages depend only on the caller's identity and input, never on
     what the clone holds.
+    """
+
+
+class InvalidRequest(Exception):
+    """The request itself is malformed or cannot be carried out; the message is safe to show.
+
+    Raised only once the caller's rights for the path are settled, so its
+    messages may describe what the caller's own areas hold.
     """
 
 
@@ -84,6 +112,30 @@ class Policy:
             raise AccessDenied(ACCESS_DENIED)
         return frozenset(areas)
 
+    def may_write(
+        self, identity: Identity, parts: tuple[str, ...], operation: WriteOperation
+    ) -> str:
+        """The area ``operation`` on the note at ``parts`` writes to; raises when it may not.
+
+        The one decision every write tool asks for. A person writes exactly
+        where they read; ``operation`` is where rules that differ by operation
+        (devices without a person) will plug in. Reads only the given names,
+        never the clone: a foreign area answers NotFound like a missing note,
+        and only inside the caller's own areas do the messages get specific.
+        """
+        del operation  # every operation is allowed for a person; device rules will read it
+        areas = self.areas_for(identity)
+        if not parts:
+            raise NotFound(NOTE_NOT_FOUND)
+        area = check_area(parts[0], areas, NOTE_NOT_FOUND)
+        if len(parts) < _MIN_WRITE_SEGMENTS or parts[1] not in WRITABLE_FOLDERS:
+            raise AccessDenied(WRITE_OUTSIDE)
+        if parts[-1] in PROTECTED_NAMES:
+            raise AccessDenied(PROTECTED_FILE)
+        if parts[-1] in INDEX_NAMES:
+            raise AccessDenied(INDEX_FILE)
+        return area
+
 
 # The one answer for every path or area the caller cannot see, whatever the
 # reason: outside their areas, absent, or a symlink leading elsewhere. A
@@ -92,6 +144,19 @@ class Policy:
 NOTE_NOT_FOUND = "no such note"
 FOLDER_NOT_FOUND = "no such folder"
 AREA_NOT_FOUND = "no such area"
+
+WRITE_OUTSIDE = (
+    "notes can only be written below <area>/memory/ or <area>/wiki/, "
+    "e.g. 'household/memory/wifi.md'"
+)
+PROTECTED_FILE = "CLAUDE.md and AGENTS.md cannot be written through memex"
+INDEX_FILE = (
+    "index files (MEMORY.md, _index.md, _master-index.md) cannot be written directly; "
+    "create adds a new note's line to its index"
+)
+FORBIDDEN_CHARACTER = "the path contains a forbidden character"
+# Unicode categories no written path may contain: control characters and line breaks.
+_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
 
 
 def split_path(path: str) -> tuple[str, ...]:
@@ -103,7 +168,7 @@ def split_path(path: str) -> tuple[str, ...]:
     distinct messages say nothing about what exists.
     """
     if "\x00" in path or "\\" in path:
-        raise AccessDenied("the path contains a forbidden character")
+        raise AccessDenied(FORBIDDEN_CHARACTER)
     if path.startswith("/"):
         raise AccessDenied("absolute paths are not allowed; give a path like 'area/folder/note.md'")
     parts = tuple(part for part in path.split("/") if part not in {"", "."})
@@ -177,6 +242,41 @@ def resolve_folder(root: Path, area: str, folder: str | None, areas: frozenset[s
     if not resolved.real.is_dir():
         raise NotFound(FOLDER_NOT_FOUND)
     return resolved
+
+
+def split_write_path(path: str) -> tuple[str, ...]:
+    """``split_path`` for a note to write: an ``.md`` name, no control character or line break.
+
+    The path ends up in a commit message, one line per file.
+    """
+    parts = split_path(path)
+    if any(unicodedata.category(char) in _FORBIDDEN_CATEGORIES for char in path):
+        raise AccessDenied(FORBIDDEN_CHARACTER)
+    if not parts or not parts[-1].endswith(NOTE_SUFFIX):
+        raise AccessDenied(f"only notes ({NOTE_SUFFIX} files) can be written")
+    return parts
+
+
+def resolve_write(root: Path, parts: tuple[str, ...], area: str) -> Path:
+    """Where the note at ``parts`` lives in the clone; it may not exist yet.
+
+    Call it once ``Policy.may_write`` has passed. No part of the path may be
+    a symlink, the area directory included, and no part but the last may be
+    anything other than a directory; whatever stands in the way answers like
+    a missing note. After resolution the folder must still lie inside the area.
+    """
+    real_root = root.resolve()
+    current = real_root
+    for index, part in enumerate(parts):
+        current = current / part
+        if current.is_symlink():
+            raise NotFound(NOTE_NOT_FOUND)
+        last = index == len(parts) - 1
+        if not last and current.exists() and not current.is_dir():
+            raise NotFound(NOTE_NOT_FOUND)
+    if not current.parent.resolve().is_relative_to(real_root / area):
+        raise NotFound(NOTE_NOT_FOUND)
+    return current
 
 
 def is_utf8(name: str) -> bool:
