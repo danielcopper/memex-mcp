@@ -78,7 +78,11 @@ url = "http://ollama.example.org:11434"
 model = "bge-m3"
 # Whole number, 1 to 2147483647.
 dimensions = 1024
-# Both timeouts 0.1 to 86400.
+# A call to the embedder must finish within its timeout. It is checked once
+# the headers have arrived and after each part of the answer, so a server that
+# goes silent can stretch a call by up to one more timeout, and one that
+# trickles its headers or the framing of its answer byte by byte for longer
+# still. Both 0.1 to 86400.
 query_timeout_seconds = 3.0
 index_timeout_seconds = 120.0
 # 0 to 86400.

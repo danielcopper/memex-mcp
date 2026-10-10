@@ -6,14 +6,17 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Callable, Iterator
+import time
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast, override
 
 import httpx2
 import pytest
 
+import memex_mcp.embed as embed_module
 from memex_mcp.config import Config, build_config
 from memex_mcp.embed import Embedder, EmbeddingError, OllamaEmbedder
 from memex_mcp.rights import Identity
@@ -198,6 +201,42 @@ class FailingEmbedder(Embedder):
         raise EmbeddingError(self.message)
 
 
+class Trickle(httpx2.SyncByteStream):
+    """A body sent in chunks, after a pause before each; counts the chunks taken."""
+
+    def __init__(self, chunks: Iterable[bytes], pause: float = 0.0) -> None:
+        self.chunks: Iterable[bytes] = chunks
+        self.pause: float = pause
+        self.sent: int = 0
+
+    @override
+    def __iter__(self) -> Iterator[bytes]:
+        for chunk in self.chunks:
+            time.sleep(self.pause)
+            self.sent += 1
+            yield chunk
+
+
+def as_stream(response: httpx2.Response) -> httpx2.Response:
+    """``response`` as a network transport hands it over: its body not read yet.
+
+    A response built from bytes or JSON reads itself when it is made.
+    """
+    if not response.is_stream_consumed:
+        return response
+    return httpx2.Response(
+        response.status_code,
+        headers=response.headers,
+        stream=Trickle([response.content]),
+        extensions=response.extensions,
+    )
+
+
+def streamed(transport: httpx2.MockTransport) -> httpx2.MockTransport:
+    """``transport`` with every answer's body still to be read, as from the network."""
+    return httpx2.MockTransport(lambda request: as_stream(transport.handle_request(request)))
+
+
 def null_vectors(texts: list[str]) -> httpx2.Response:
     """An answer with a vector of nulls for every text."""
     return httpx2.Response(
@@ -205,28 +244,38 @@ def null_vectors(texts: list[str]) -> httpx2.Response:
     )
 
 
-class NestedTooDeeply(httpx2.Response):
-    """An answer whose JSON runs out of stack while it is decoded.
+def oversized(_texts: list[str]) -> httpx2.Response:
+    """An answer that declares more bytes than any request here allows."""
+    return httpx2.Response(200, headers={"content-length": "5000000"})
+
+
+def late(texts: list[str]) -> httpx2.Response:
+    """A good answer that comes after the shortest timeout, 0.1 s, has passed."""
+    time.sleep(0.2)
+    return httpx2.Response(
+        200, json={"embeddings": [[1.0] * FakeEmbedder.dimensions for _ in texts]}
+    )
+
+
+@pytest.fixture
+def too_deep_to_decode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every answer's JSON runs out of stack while the embedder decodes it.
 
     How deep a document must be for that depends on the Python build and the
     stack size (a document that overflows an 8 MB stack parses with 16 MB), so
-    the error is raised here instead of by a deep document.
+    the json module as the embedder sees it raises the error instead.
     """
 
-    @override
-    def json(self, **kwargs: object) -> object:
+    def loads(_document: bytes) -> object:
         raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
 
-
-def nested_too_deeply(_texts: list[str]) -> httpx2.Response:
-    """An answer the json module runs out of stack on."""
-    return NestedTooDeeply(200, content=b"[]")
+    monkeypatch.setattr(embed_module, "json", SimpleNamespace(loads=loads))
 
 
 def malformed_ollama(
     answer: Callable[[list[str]], httpx2.Response] = null_vectors,
 ) -> OllamaEmbedder:
-    """Ollama on a mocked transport that gives every request a malformed answer."""
+    """Ollama on a mocked transport that answers every request with ``answer``."""
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         return answer(cast("dict[str, list[str]]", json.loads(request.content))["input"])
@@ -235,7 +284,7 @@ def malformed_ollama(
         "http://ollama.example.org:11434",
         FakeEmbedder.model,
         FakeEmbedder.dimensions,
-        transport=httpx2.MockTransport(handler),
+        transport=streamed(httpx2.MockTransport(handler)),
     )
 
 

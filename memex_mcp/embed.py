@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import math
+import time
 from http import HTTPStatus
 from typing import Protocol, cast
 
@@ -32,6 +34,13 @@ _TEXT_CHARS = 200
 # The codes after which a Location header says where the answer moved (not 300, which
 # offers a choice).
 _REDIRECTS = frozenset({301, 302, 303, 307, 308})
+# An answer may hold this many bytes per value it should carry, plus this much
+# for the rest. Ollama writes each float32 in its shortest form, at most nine
+# digits: a value of a unit vector takes at most 17 characters and a comma
+# (shaped like -0.00000123456789), about 12.4 on average, so 32 is about twice
+# the worst case.
+_BYTES_PER_VALUE = 32
+_ANSWER_ALLOWANCE = 64 * 1024
 
 
 def _clip(text: str, chars: int) -> str:
@@ -49,7 +58,7 @@ def _escaped(text: str, chars: int) -> str:
 
 
 class EmbeddingError(Exception):
-    """The embedder did not answer, answered too slowly, or answered nonsense."""
+    """The embedder did not answer, answered too slowly, or answered nonsense or too much."""
 
 
 def _failure(exc: Exception) -> EmbeddingError:
@@ -94,14 +103,64 @@ def _vector(position: int, vector: object, dimensions: int) -> list[float]:
     return result
 
 
-def _ollama_says(response: httpx2.Response) -> str:
-    """Ollama's own error text from an error answer, as a message suffix; empty if none."""
+def _in_time(deadline: float, timeout: float) -> None:
+    """EmbeddingError once ``deadline`` has passed."""
+    if time.monotonic() > deadline:
+        raise EmbeddingError(f"no complete answer within {timeout:g} s")
+
+
+def _body(response: httpx2.Response, limit: int, deadline: float, timeout: float) -> bytes:
+    """The answer's body; EmbeddingError if compressed, over ``limit`` bytes or past ``deadline``.
+
+    The body is read as it comes over the wire, undecoded, so a compressed answer is refused
+    before it is read. The deadline is checked once the headers have arrived and after each
+    part of the answer, so a server that goes silent can stretch the call by up to one more
+    timeout, and one that trickles its headers or the framing of its answer byte by byte
+    for longer still.
+    """
+    encoding = response.headers.get("content-encoding", "")
+    if encoding.strip().lower() not in {"", "identity"}:
+        raise EmbeddingError(
+            f"the answer is compressed ({_clip(encoding, _NAME_CHARS)}), "
+            + "which the embedder should not do"
+        )
+    declared = response.headers.get("content-length", "")
+    if declared.isdecimal() and int(declared) > limit:
+        raise EmbeddingError(
+            f"the answer is larger than {limit:,} bytes (Content-Length {int(declared):,})"
+        )
+    _in_time(deadline, timeout)
+    chunks: list[bytes] = []
+    received = 0
+    for chunk in response.iter_raw():
+        received += len(chunk)
+        if received > limit:
+            raise EmbeddingError(
+                f"the answer is larger than {limit:,} bytes ({received:,} bytes received)"
+            )
+        _in_time(deadline, timeout)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _ollama_says(body: bytes) -> str:
+    """Ollama's own error text from an error answer's body, as a message suffix; empty if none."""
     try:
-        payload = cast("object", response.json())
+        payload = cast("object", json.loads(body))
     except (ValueError, RecursionError):
         return ""
     error = cast("dict[str, object]", payload).get("error") if isinstance(payload, dict) else None
     return f"; Ollama says {_clip(error, _ERROR_CHARS)}" if isinstance(error, str) else ""
+
+
+def _error_text(response: httpx2.Response, limit: int, deadline: float, timeout: float) -> str:
+    """What follows the status of an error answer: Ollama's text, or why its body was not read."""
+    try:
+        return _ollama_says(_body(response, limit, deadline, timeout))
+    except EmbeddingError as exc:
+        return f"; {exc}"
+    except httpx2.HTTPError as exc:
+        return f"; {_failure(exc)}"
 
 
 def _status(response: httpx2.Response) -> str:
@@ -140,24 +199,36 @@ class OllamaEmbedder:
     ) -> None:
         self.model: str = model
         self.dimensions: int = dimensions
-        self._client: httpx2.Client = httpx2.Client(base_url=url.rstrip("/"), transport=transport)
+        # The answer is read undecoded, so it must not be compressed.
+        self._client: httpx2.Client = httpx2.Client(
+            base_url=url.rstrip("/"),
+            headers={"accept-encoding": "identity"},
+            transport=transport,
+        )
 
     def embed(self, texts: list[str], timeout: float) -> list[list[float]]:
         if not texts:
             return []
+        limit = len(texts) * self.dimensions * _BYTES_PER_VALUE + _ANSWER_ALLOWANCE
+        # The whole call must finish within the timeout; httpx2 applies it to each step,
+        # so _body also checks it against this deadline.
+        deadline = time.monotonic() + timeout
         try:
-            response = self._client.post(
+            with self._client.stream(
+                "POST",
                 "/api/embed",
                 json={"model": self.model, "input": texts},
                 timeout=timeout,
-            )
-            response.raise_for_status()
-        except httpx2.HTTPStatusError as exc:
-            raise EmbeddingError(f"{_status(exc.response)}{_ollama_says(exc.response)}") from exc
+            ) as response:
+                if not response.is_success:
+                    raise EmbeddingError(
+                        _status(response) + _error_text(response, limit, deadline, timeout)
+                    )
+                body = _body(response, limit, deadline, timeout)
         except (httpx2.HTTPError, ValueError, RecursionError) as exc:
             raise _failure(exc) from exc
         try:
-            payload = cast("object", response.json())
+            payload = cast("object", json.loads(body))
         except ValueError as exc:
             raise _failure(exc) from exc
         except RecursionError as exc:

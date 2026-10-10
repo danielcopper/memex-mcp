@@ -7,11 +7,12 @@ import os
 import socket
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import closing
 from pathlib import Path
 from typing import cast
 
+import httpx2
 import pytest
 
 import memex_mcp.index as index_module
@@ -26,8 +27,10 @@ from tests.conftest import (
     FakeEmbedder,
     Origin,
     git,
+    late,
     make_config,
     malformed_ollama,
+    oversized,
 )
 
 
@@ -178,6 +181,36 @@ def test_a_malformed_embedder_answer_pauses_embedding(tmp_path: Path, origin: Or
     try:
         assert memex.backfill() == 0
         assert len(memex.index.missing_vectors(10)) > 0
+    finally:
+        memex.index.close()
+        embedder.close()
+
+
+@pytest.mark.parametrize(
+    ("answer", "problem"),
+    [
+        (oversized, "the answer is larger than 66,048 bytes (Content-Length 5,000,000)"),
+        (late, "no complete answer within 0.1 s"),
+    ],
+    ids=["too large", "too late"],
+)
+def test_a_limit_hit_while_embedding_notes_is_logged_with_its_measure(
+    tmp_path: Path,
+    origin: Origin,
+    caplog: pytest.LogCaptureFixture,
+    answer: Callable[[list[str]], httpx2.Response],
+    problem: str,
+) -> None:
+    embedder = malformed_ollama(answer)
+    config = make_config(
+        tmp_path, origin, embeddings={"index_timeout_seconds": 0.1, "batch_size": 1}
+    )
+    memex = Memex.from_config(config, embedder=embedder)
+    memex.prepare()
+    try:
+        with caplog.at_level(logging.WARNING, logger="memex_mcp.service"):
+            assert memex.backfill() == 0
+        assert f"embedding paused, 0 chunks done this round: {problem}" in caplog.text
     finally:
         memex.index.close()
         embedder.close()

@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import gzip
+import itertools
 import json
 import re
+import time
+from collections.abc import Iterator
 from typing import cast
 
 import httpx2
 import pytest
 
 from memex_mcp.embed import EmbeddingError, OllamaEmbedder
-from tests.conftest import NestedTooDeeply
+from tests.conftest import Trickle, streamed
 
 
 def raw_answer(body: bytes) -> httpx2.Response:
@@ -21,10 +25,15 @@ def raw_answer(body: bytes) -> httpx2.Response:
 # Deep enough that json runs out of an 8 MB stack; with more stack it parses
 # into nested lists. Either way the answer is an EmbeddingError.
 NESTED_TOO_DEEPLY = b"[" * 100_000 + b"]" * 100_000
+# A request for one vector of this many values admits that document's 200,000
+# bytes (its limit is 327,680), so the document reaches the decoder.
+NESTED_DIMENSIONS = 8192
 
 
-def embedder(handler: httpx2.MockTransport) -> OllamaEmbedder:
-    return OllamaEmbedder("http://ollama.example.org:11434/", "bge-m3", 3, transport=handler)
+def embedder(handler: httpx2.MockTransport, dimensions: int = 3) -> OllamaEmbedder:
+    return OllamaEmbedder(
+        "http://ollama.example.org:11434/", "bge-m3", dimensions, transport=streamed(handler)
+    )
 
 
 def test_embeds_a_batch_in_order() -> None:
@@ -66,7 +75,6 @@ def test_embeds_a_batch_in_order() -> None:
         httpx2.Response(200, json={"embeddings": [[1e-46, 0, 0]]}),
         httpx2.Response(200, json={"embeddings": [[1.9e19, 0, 0]]}),
         httpx2.Response(200, json={"model": "bge-m3", "error": "no such route"}),
-        raw_answer(NESTED_TOO_DEEPLY),
     ],
     ids=[
         "http-500",
@@ -90,7 +98,6 @@ def test_embeds_a_batch_in_order() -> None:
         "vector-subnormal",
         "vector-too-long",
         "no-embeddings-member",
-        "nested-deeply",
     ],
 )
 def test_bad_answers_raise_embedding_error(response: httpx2.Response) -> None:
@@ -138,7 +145,6 @@ def test_bad_answers_raise_embedding_error(response: httpx2.Response) -> None:
             ["a"],
             "vector 0 is too long: its squared length overflows float32",
         ),
-        (NestedTooDeeply(200, content=b"[]"), ["a"], "the answer is nested too deeply"),
         (
             httpx2.Response(200, json={"model": "bge-m3", "error": "no such route"}),
             ["a"],
@@ -156,7 +162,6 @@ def test_bad_answers_raise_embedding_error(response: httpx2.Response) -> None:
         "zero",
         "near-zero",
         "too-long",
-        "nested-too-deeply",
         "no-embeddings-member",
     ],
 )
@@ -174,9 +179,10 @@ def test_a_vector_just_inside_float32_is_accepted() -> None:
     assert vectors == [[1.8e19, 0.0, 0.0]]
 
 
-def message_for(response: httpx2.Response) -> str:
+def message_for(response: httpx2.Response, timeout: float = 1.0, dimensions: int = 3) -> str:
+    client = embedder(httpx2.MockTransport(lambda _request: response), dimensions)
     with pytest.raises(EmbeddingError) as raised:
-        embedder(httpx2.MockTransport(lambda _request: response)).embed(["a"], timeout=1.0)
+        client.embed(["a"], timeout=timeout)
     return str(raised.value)
 
 
@@ -209,8 +215,6 @@ OLLAMA_ERROR = 'model "bge-m3" not found, try pulling it first'
         (httpx2.Response(500, text="model not loaded"), "HTTP 500 Internal Server Error"),
         (httpx2.Response(500, json={"error": 5}), "HTTP 500 Internal Server Error"),
         (httpx2.Response(500, json=["error"]), "HTTP 500 Internal Server Error"),
-        (httpx2.Response(500, content=NESTED_TOO_DEEPLY), "HTTP 500 Internal Server Error"),
-        (NestedTooDeeply(500, content=b"[]"), "HTTP 500 Internal Server Error"),
     ],
     ids=[
         "model-missing",
@@ -218,14 +222,37 @@ OLLAMA_ERROR = 'model "bge-m3" not found, try pulling it first'
         "not-json",
         "error-not-text",
         "not-an-object",
-        "nested-deeply",
-        "nested-too-deeply",
     ],
 )
 def test_an_error_status_carries_ollamas_own_error_text(
     response: httpx2.Response, message: str
 ) -> None:
     assert message_for(response) == message
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [(200, None), (500, "HTTP 500 Internal Server Error")],
+    ids=["answer", "error-answer"],
+)
+def test_a_deeply_nested_answer_raises_embedding_error(status: int, message: str | None) -> None:
+    raised = message_for(
+        httpx2.Response(status, content=NESTED_TOO_DEEPLY), dimensions=NESTED_DIMENSIONS
+    )
+    # The document must reach the decoder, not stop at the size limit.
+    assert "larger than" not in raised
+    if message is not None:
+        assert raised == message
+
+
+@pytest.mark.usefixtures("too_deep_to_decode")
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [(200, "the answer is nested too deeply"), (500, "HTTP 500 Internal Server Error")],
+    ids=["answer", "error-answer"],
+)
+def test_an_answer_too_deep_to_decode_raises_embedding_error(status: int, message: str) -> None:
+    assert message_for(httpx2.Response(status, content=b"[]")) == message
 
 
 LOCATION = "http://ollama.example.org:11434/api/embed/"
@@ -309,3 +336,182 @@ def test_nothing_to_embed_makes_no_request() -> None:
         raise AssertionError("no request expected")
 
     assert embedder(httpx2.MockTransport(fail)).embed([], timeout=1.0) == []
+
+
+# For one text of 3 values: 3 x 32 bytes plus 64 KiB.
+LIMIT = 65_632
+KIB = b" " * 1024
+ANSWER = b'{"embeddings": [[1, 0, 0]]}'
+
+
+def padded(size: int) -> bytes:
+    """A good answer for one text, padded with whitespace to ``size`` bytes."""
+    return ANSWER + b" " * (size - len(ANSWER))
+
+
+@pytest.mark.parametrize("size", [LIMIT - 1, LIMIT], ids=["just-under", "exactly"])
+@pytest.mark.parametrize("declared", [True, False], ids=["declared", "read"])
+def test_an_answer_within_the_size_limit_is_read(size: int, declared: bool) -> None:
+    body = padded(size)
+    response = (
+        httpx2.Response(200, content=body)  # declares its Content-Length
+        if declared
+        else httpx2.Response(200, stream=Trickle([body[:1000], body[1000:]]))
+    )
+    vectors = embedder(httpx2.MockTransport(lambda _request: response)).embed(["a"], timeout=1.0)
+    assert vectors == [[1.0, 0.0, 0.0]]
+
+
+def test_an_answer_past_the_size_limit_is_not_read_further() -> None:
+    # 1 KiB at a time, 1000 times the limit on offer: reading stops at the chunk
+    # that crosses it, the 65th.
+    body = Trickle(itertools.repeat(KIB, 1000 * LIMIT // len(KIB)))
+    response = httpx2.Response(200, stream=body)
+    assert message_for(response) == "the answer is larger than 65,632 bytes (66,560 bytes received)"
+    assert body.sent == LIMIT // len(KIB) + 1
+
+
+def test_a_declared_size_past_the_limit_is_refused_before_reading() -> None:
+    body = Trickle(itertools.repeat(KIB, 5000))
+    response = httpx2.Response(200, headers={"content-length": "5000000"}, stream=body)
+    assert (
+        message_for(response) == "the answer is larger than 65,632 bytes (Content-Length 5,000,000)"
+    )
+    assert body.sent == 0
+
+
+def test_an_answer_one_byte_past_the_limit_is_refused() -> None:
+    body = Trickle([padded(LIMIT + 1)])
+    assert message_for(httpx2.Response(200, stream=body)) == (
+        "the answer is larger than 65,632 bytes (65,633 bytes received)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("texts", "dimensions", "limit"),
+    [(1, 3, "65,632"), (2, 3, "65,728"), (1, 1024, "98,304"), (32, 1024, "1,114,112")],
+)
+def test_the_size_limit_scales_with_texts_and_dimensions(
+    texts: int, dimensions: int, limit: str
+) -> None:
+    response = httpx2.Response(200, headers={"content-length": "5000000"}, stream=Trickle([]))
+    client = embedder(httpx2.MockTransport(lambda _request: response), dimensions)
+    with pytest.raises(EmbeddingError) as raised:
+        client.embed(["a"] * texts, timeout=1.0)
+    assert (
+        str(raised.value) == f"the answer is larger than {limit} bytes (Content-Length 5,000,000)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("headers", "sent", "limit_hit"),
+    [
+        ({}, LIMIT // len(KIB) + 1, "66,560 bytes received"),
+        ({"content-length": "5000000"}, 0, "Content-Length 5,000,000"),
+    ],
+    ids=["read", "declared"],
+)
+def test_an_error_answer_past_the_size_limit_names_the_limit_after_the_status(
+    headers: dict[str, str], sent: int, limit_hit: str
+) -> None:
+    error = b'{"error": "' + b"x" * (2 * LIMIT) + b'"}'
+    body = Trickle(error[start : start + len(KIB)] for start in range(0, len(error), len(KIB)))
+    response = httpx2.Response(500, headers=headers, stream=body)
+    assert message_for(response) == (
+        f"HTTP 500 Internal Server Error; the answer is larger than 65,632 bytes ({limit_hit})"
+    )
+    assert body.sent == sent
+
+
+def test_a_dripping_answer_ends_near_the_deadline() -> None:
+    # The whole answer would take 2 s; the deadline is 0.2 s and a chunk 0.05 s.
+    body = Trickle(itertools.chain([ANSWER], itertools.repeat(b" ", 40)), pause=0.05)
+    started = time.monotonic()
+    message = message_for(httpx2.Response(200, stream=body), timeout=0.2)
+    assert message == "no complete answer within 0.2 s"
+    assert time.monotonic() - started < 1.0
+
+
+def test_the_wait_for_the_answer_counts_toward_the_deadline() -> None:
+    body = Trickle([ANSWER])
+
+    def answer_late(_request: httpx2.Request) -> httpx2.Response:
+        time.sleep(0.3)
+        return httpx2.Response(200, stream=body)
+
+    with pytest.raises(EmbeddingError) as raised:
+        embedder(httpx2.MockTransport(answer_late)).embed(["a"], timeout=0.2)
+    assert str(raised.value) == "no complete answer within 0.2 s"
+    assert body.sent == 0
+
+
+def test_an_error_answer_past_the_deadline_names_the_timeout_after_the_status() -> None:
+    body = Trickle([b'{"error": ', b'"slow"}'], pause=0.15)
+    response = httpx2.Response(500, stream=body)
+    assert message_for(response, timeout=0.2) == (
+        "HTTP 500 Internal Server Error; no complete answer within 0.2 s"
+    )
+
+
+def test_an_error_answer_whose_body_fails_names_the_failure_after_the_status() -> None:
+    def stalled() -> Iterator[bytes]:
+        yield b'{"error": '
+        raise httpx2.ReadTimeout("timed out")
+
+    response = httpx2.Response(500, stream=Trickle(stalled()))
+    assert message_for(response) == "HTTP 500 Internal Server Error; ReadTimeout: timed out"
+
+
+def test_the_request_asks_for_an_uncompressed_answer() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx2.Response(200, content=ANSWER)
+
+    assert embedder(httpx2.MockTransport(handler)).embed(["a"], timeout=1.0) == [[1.0, 0.0, 0.0]]
+
+
+@pytest.mark.parametrize("encoding", [" Identity ", ""], ids=["identity", "empty"])
+def test_an_answer_declared_uncompressed_is_read(encoding: str) -> None:
+    response = httpx2.Response(200, headers={"content-encoding": encoding}, content=ANSWER)
+    vectors = embedder(httpx2.MockTransport(lambda _request: response)).embed(["a"], timeout=1.0)
+    assert vectors == [[1.0, 0.0, 0.0]]
+
+
+@pytest.mark.parametrize(
+    ("status", "encoding", "message"),
+    [
+        (200, "gzip", "the answer is compressed ('gzip'), which the embedder should not do"),
+        (
+            200,
+            "\x1b[31m" + "x" * 100,
+            "the answer is compressed ("
+            + repr("\x1b[31m" + "x" * (64 - len("\x1b[31m")) + "…")
+            + "), which the embedder should not do",
+        ),
+        (
+            500,
+            "gzip",
+            "HTTP 500 Internal Server Error; "
+            + "the answer is compressed ('gzip'), which the embedder should not do",
+        ),
+    ],
+    ids=["gzip", "escaped-and-cut", "error-answer"],
+)
+def test_a_compressed_answer_is_refused_unread(status: int, encoding: str, message: str) -> None:
+    body = Trickle([gzip.compress(ANSWER)])
+    response = httpx2.Response(status, headers={"content-encoding": encoding}, stream=body)
+    assert message_for(response) == message
+    assert body.sent == 0
+
+
+def test_a_compressed_answer_is_not_decoded_while_the_deadline_runs() -> None:
+    # A gzip header announcing a comment, then the comment one byte per 0.05 s:
+    # decoded, it yields nothing, so a reader that decodes would wait the whole
+    # 2 s before any check could see it.
+    header = b"\x1f\x8b\x08\x10" + b"\x00" * 6
+    body = Trickle(itertools.chain([header], itertools.repeat(b"a", 40)), pause=0.05)
+    response = httpx2.Response(200, headers={"content-encoding": "gzip"}, stream=body)
+    started = time.monotonic()
+    message = message_for(response, timeout=0.2)
+    assert message == "the answer is compressed ('gzip'), which the embedder should not do"
+    assert time.monotonic() - started < 1.0
