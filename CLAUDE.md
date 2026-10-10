@@ -1,7 +1,8 @@
 # CLAUDE.md — how to work in memex-mcp
 
-memex-mcp is a read-only MCP server over a git repository of Markdown notes, one area per person plus a shared one. The
-README describes the architecture, the trust model and the setup.
+memex-mcp is an MCP server over a git repository of Markdown notes, one area per person plus a shared one: it searches,
+reads and writes them. The README describes the architecture, the trust model and the setup;
+[docs/memex-format.md](docs/memex-format.md) the repository's conventions.
 
 ## Gates
 
@@ -21,8 +22,9 @@ CI runs the same on Python 3.12 (the floor) and 3.14, and builds the container i
 ## Ground rules
 
 - **The rights core is `memex_mcp/rights.py`.** Every tool asks it for the caller's areas and for every path; nothing
-  reads the clone without passing there. Search reads only the FTS5 tables of the caller's areas, filters vectors by
-  area in SQL (`memex_mcp/index.py`), and checks the area again in the service.
+  reads the clone without passing there. Every write tool asks `Policy.may_write` before it touches the clone. Search
+  reads only the FTS5 tables of the caller's areas, filters vectors by area in SQL (`memex_mcp/index.py`), and checks
+  the area again in the service.
 - **What the caller cannot see answers like what does not exist**: same exception (`NotFound`), same fixed message,
   refused before the clone is touched. Error messages never name an area, a configured value or a server path. Messages
   that depend only on the caller's input (absolute path, `..`, hidden segment) may be specific. A caller without any
@@ -38,8 +40,9 @@ CI runs the same on Python 3.12 (the floor) and 3.14, and builds the container i
   temporary directory for the whole session; origins are local bare repositories; the JWKS endpoint is a local HTTP
   server on 127.0.0.1, Ollama a mocked transport.
 - Runtime dependencies are pinned exactly in `pyproject.toml` (this is an application), dev tools too.
-- Version 1 is read-only. Writing (a commit per write, push, generated index files) comes later; keep the service layer
-  the one place that would grow it.
+- **Writes live in the service layer.** `memex_mcp/notes.py` computes the new texts, `Memex` commits and pushes them
+  under one lock that also covers the refresh loop's merging, rebasing and pushing. One commit per call; no note content
+  in commit messages or logs.
 
 ## Pitfalls
 
