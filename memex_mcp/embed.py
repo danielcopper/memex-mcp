@@ -41,6 +41,13 @@ _REDIRECTS = frozenset({301, 302, 303, 307, 308})
 # the worst case.
 _BYTES_PER_VALUE = 32
 _ANSWER_ALLOWANCE = 64 * 1024
+# Ollama's model list may hold this many bytes. An entry takes about 350 bytes
+# (the example in Ollama's API docs), so this holds about three thousand models,
+# while an endpoint that is not Ollama cannot make the check read more.
+_TAGS_LIMIT = 1024 * 1024
+# The parts Ollama fills into a model's name when it gives none.
+_DEFAULT_HOST = "registry.ollama.ai"
+_DEFAULT_NAMESPACE = "library"
 
 
 def _clip(text: str, chars: int) -> str:
@@ -72,6 +79,10 @@ class Embedder(Protocol):
 
     def embed(self, texts: list[str], timeout: float) -> list[list[float]]:
         """One vector of ``dimensions`` floats per text, in order."""
+        ...
+
+    def check(self, timeout: float) -> None:
+        """EmbeddingError unless the embedder answers and offers ``model``; loads no model."""
         ...
 
 
@@ -179,6 +190,41 @@ def _status(response: httpx2.Response) -> str:
     return status
 
 
+def _listed_as(model: str) -> frozenset[str]:
+    """The names under which Ollama's model list can show ``model``.
+
+    The list shows each model in its shortest form (Ollama's ``Name.DisplayShortest``):
+    without the default host ``registry.ollama.ai`` and the default namespace ``library``,
+    and always with its tag, ``latest`` if the name gives none. So ``bge-m3``,
+    ``library/bge-m3`` and ``registry.ollama.ai/library/bge-m3`` are all listed as
+    ``bge-m3:latest``; a name without a tag also matches its untagged form. As in Ollama's
+    parser (``ParseNameBare``), a colon after the last slash starts the tag, the part after
+    the last slash is the model, the part before it the namespace, and what is left the host.
+    """
+    name, tag = model, ""
+    if name.rfind(":") > name.rfind("/"):
+        name, _, tag = name.rpartition(":")
+    rest, _, base = name.rpartition("/")
+    host, _, namespace = rest.rpartition("/")
+    if host not in {"", _DEFAULT_HOST}:
+        shortest = f"{host}/{namespace}/{base}"
+    elif namespace not in {"", _DEFAULT_NAMESPACE}:
+        shortest = f"{namespace}/{base}"
+    else:
+        shortest = base
+    if tag:
+        return frozenset({f"{shortest}:{tag}"})
+    return frozenset({shortest, f"{shortest}:latest"})
+
+
+def _names_of(entry: object) -> set[str]:
+    """The names an entry of Ollama's model list gives its model (``name`` and ``model``)."""
+    if not isinstance(entry, dict):
+        return set()
+    members = cast("dict[str, object]", entry)
+    return {name for name in (members.get("name"), members.get("model")) if isinstance(name, str)}
+
+
 def _member_names(members: dict[str, object]) -> str:
     """The answer's member names for a message, escaped, cut and counted."""
     names = sorted(members)
@@ -188,7 +234,7 @@ def _member_names(members: dict[str, object]) -> str:
 
 
 class OllamaEmbedder:
-    """Calls Ollama's ``POST /api/embed``."""
+    """Calls Ollama's ``POST /api/embed``, and ``GET /api/tags`` to check it."""
 
     def __init__(
         self,
@@ -206,20 +252,19 @@ class OllamaEmbedder:
             transport=transport,
         )
 
-    def embed(self, texts: list[str], timeout: float) -> list[list[float]]:
-        if not texts:
-            return []
-        limit = len(texts) * self.dimensions * _BYTES_PER_VALUE + _ANSWER_ALLOWANCE
+    def _answer(
+        self, path: str, member: str, limit: int, timeout: float, request: object = None
+    ) -> object:
+        """The answer's ``member``, read within ``limit`` bytes and ``timeout`` seconds.
+
+        A ``request`` is POSTed as JSON; without one the call is a GET.
+        """
+        method = "GET" if request is None else "POST"
         # The whole call must finish within the timeout; httpx2 applies it to each step,
         # so _body also checks it against this deadline.
         deadline = time.monotonic() + timeout
         try:
-            with self._client.stream(
-                "POST",
-                "/api/embed",
-                json={"model": self.model, "input": texts},
-                timeout=timeout,
-            ) as response:
+            with self._client.stream(method, path, json=request, timeout=timeout) as response:
                 if not response.is_success:
                     raise EmbeddingError(
                         _status(response) + _error_text(response, limit, deadline, timeout)
@@ -237,12 +282,20 @@ class OllamaEmbedder:
         if not isinstance(payload, dict):
             raise EmbeddingError(f"the answer is {json_kind(payload)}, not an object")
         members = cast("dict[str, object]", payload)
-        if "embeddings" not in members:
+        if member not in members:
             raise EmbeddingError(
-                f"the answer has no 'embeddings' member (it has: {_member_names(members)}); "
+                f"the answer has no {member!r} member (it has: {_member_names(members)}); "
                 + "is [embeddings] url Ollama's API?"
             )
-        vectors = members["embeddings"]
+        return members[member]
+
+    def embed(self, texts: list[str], timeout: float) -> list[list[float]]:
+        if not texts:
+            return []
+        limit = len(texts) * self.dimensions * _BYTES_PER_VALUE + _ANSWER_ALLOWANCE
+        vectors = self._answer(
+            "/api/embed", "embeddings", limit, timeout, {"model": self.model, "input": texts}
+        )
         if not isinstance(vectors, list):
             raise EmbeddingError(f"embeddings is {json_kind(vectors)}, not a list")
         items = cast("list[object]", vectors)
@@ -251,6 +304,18 @@ class OllamaEmbedder:
                 f"the embedder returned {len(items)} vectors for {len(texts)} texts"
             )
         return [_vector(position, vector, self.dimensions) for position, vector in enumerate(items)]
+
+    def check(self, timeout: float) -> None:
+        """Asks ``GET /api/tags``, the list of the models Ollama holds, which loads none of them.
+
+        Each entry names its model in ``name`` and in ``model`` (Ollama's ``ListModelResponse``).
+        """
+        models = self._answer("/api/tags", "models", _TAGS_LIMIT, timeout)
+        if not isinstance(models, list):
+            raise EmbeddingError(f"models is {json_kind(models)}, not a list")
+        wanted = _listed_as(self.model)
+        if not any(_names_of(entry) & wanted for entry in cast("list[object]", models)):
+            raise EmbeddingError(f"Ollama does not list the model {_clip(self.model, _NAME_CHARS)}")
 
     def close(self) -> None:
         self._client.close()
