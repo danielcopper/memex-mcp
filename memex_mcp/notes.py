@@ -155,10 +155,15 @@ def index_spot(parts: tuple[str, ...]) -> IndexSpot:
 
     The topic is the folder directly under ``<area>/memory/`` or
     ``<area>/wiki/``; a note directly in ``<area>/memory/`` has that folder
-    as its topic. ``parts`` passed ``Policy.may_write``.
+    as its topic. A note directly in ``<area>/wiki/`` has none: the master
+    index there lists topics, not notes. ``parts`` passed ``Policy.may_write``.
     """
     folder: Folder = "memory" if parts[1] == "memory" else "wiki"
     note_folder = parts[:-1]
+    if folder == "wiki" and len(note_folder) < 3:  # noqa: PLR2004 - area/wiki/topic
+        raise InvalidRequest(
+            f"wiki notes go into a topic folder: {parts[0]}/wiki/<topic>/{parts[-1]}"
+        )
     topic_depth = 3 if len(note_folder) >= 3 else 2  # noqa: PLR2004 - area/folder/topic
     candidates = tuple(
         note_folder[:depth] for depth in range(len(note_folder), topic_depth - 1, -1)

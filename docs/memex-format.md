@@ -17,7 +17,8 @@ Each area holds two folders:
 
 A **topic** is a folder directly under `<area>/memory/` or `<area>/wiki/`, for example `alice/memory/homelab/` or
 `alice/wiki/networking/`. A topic may have subfolders; they belong to it. Notes directly in `<area>/memory/` belong to
-that folder itself, which then acts as a topic of its own.
+that folder itself, which then acts as a topic of its own. New wiki notes go into a topic folder, never directly into
+`<area>/wiki/`, whose only index is the master index of topics; notes already there can still be changed.
 
 Two folder names have a meaning wherever they appear:
 
@@ -148,6 +149,7 @@ cannot be reached, the commit stays in its clone and the refresh loop pushes it 
 | Write only `.md` notes below `<area>/memory/` or `<area>/wiki/`  | enforced                         | must follow           |
 | No hidden files, no symlinks                                     | enforced                         | must follow           |
 | Protected files                                                  | enforced                         | must follow           |
+| New wiki notes only in a topic folder                            | enforced                         | must follow           |
 | A new note's index line, in the same commit                      | enforced                         | must follow           |
 | A note at most 64 KiB after a write (`write.max_note_bytes`)     | enforced                         | recommended           |
 | No machine secrets (private keys, access tokens) in written text | enforced                         | recommended           |

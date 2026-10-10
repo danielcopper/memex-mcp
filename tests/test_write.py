@@ -768,3 +768,27 @@ def test_a_note_needs_content(memex: Memex, remote: Remote) -> None:
         with pytest.raises(InvalidRequest, match="content must not be empty"):
             memex.create(ALICE, "alice/memory/daily/empty.md", empty)
     assert remote.head() == head
+
+
+def test_a_wiki_note_needs_a_topic_folder(topics: Memex, remote: Remote) -> None:
+    head = remote.head()
+    guidance = "wiki notes go into a topic folder: alice/wiki/<topic>/glossary.md"
+    with pytest.raises(InvalidRequest, match=re.escape(guidance)):
+        topics.create(ALICE, "alice/wiki/glossary.md", "# Glossary\n", "Notes", LINE)
+    with pytest.raises(InvalidRequest, match="wiki notes go into a topic folder"):
+        topics.index_sections(ALICE, "alice/wiki")
+    assert remote.head() == head
+    assert not (topics.root / "alice/wiki/glossary.md").exists()
+    assert not (topics.root / "alice/wiki/_index.md").exists()
+
+
+def test_notes_already_at_the_wiki_root_can_still_be_changed(
+    memex: Memex, origin: Origin, remote: Remote
+) -> None:
+    origin.commit("log", {"alice/wiki/log.md": "# Log\n\n- started\n"})
+    memex.refresh()
+    memex.append(ALICE, "alice/wiki/log.md", "- went on")
+    memex.edit(ALICE, "alice/wiki/log.md", "started", "began")
+    assert remote.show("alice/wiki/log.md") == "# Log\n\n- began\n- went on\n"
+    memex.delete(ALICE, "alice/wiki/log.md", memex.read(ALICE, "alice/wiki/log.md")["version"])
+    assert remote.log_of("%s") == "memex-mcp: delete alice/wiki/log.md"

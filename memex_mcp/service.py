@@ -508,15 +508,16 @@ class Memex:
         index_section: str | None,
         index_line: str | None,
     ) -> _Plan:
+        # Checked first: where a note may go depends on its path alone.
+        spot = None if is_daily(parts) else index_spot(parts)
         if target.exists():
             raise InvalidRequest(EXISTS)
         data = new_note(content).encode()
         self._check_size(data)
         note = _Change("create", "/".join(parts), data)
-        if is_daily(parts):
+        if spot is None:
             check_secrets([content])
             return _Plan(changes=(note,), version=version_of(data))
-        spot = index_spot(parts)
         index_parts, current = self._find_index(spot)
         sections = section_names(current or "")
         section = checked_section(index_section, sections)
