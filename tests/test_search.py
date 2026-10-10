@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -23,10 +24,11 @@ from tests.conftest import (
     FailingEmbedder,
     FakeEmbedder,
     Origin,
+    late,
     make_config,
     malformed_ollama,
-    nested_too_deeply,
     null_vectors,
+    oversized,
 )
 
 
@@ -144,19 +146,46 @@ def test_after_a_failure_the_embedder_rests_for_a_while(tmp_path: Path, origin: 
         memex.index.close()
 
 
-@pytest.mark.parametrize(
-    "answer", [null_vectors, nested_too_deeply], ids=["null vectors", "nested too deeply"]
-)
+@pytest.mark.parametrize("too_deep", [False, True], ids=["null vectors", "nested too deeply"])
 def test_a_malformed_embedder_answer_falls_back_to_keywords(
-    tmp_path: Path, origin: Origin, answer: Callable[[list[str]], httpx2.Response]
+    tmp_path: Path, origin: Origin, request: pytest.FixtureRequest, too_deep: bool
 ) -> None:
-    embedder = malformed_ollama(answer)
+    if too_deep:
+        request.getfixturevalue("too_deep_to_decode")
+    embedder = malformed_ollama(null_vectors)
     memex = service(tmp_path, origin, embedder)
     try:
         result = memex.search(ALICE, "degreaser")
         assert result["semantic"] is False
         assert result.get("notice") == NOTICE_UNAVAILABLE
         assert paths(result)[0] == "alice/memory/bike-repair.md"
+    finally:
+        memex.index.close()
+        embedder.close()
+
+
+@pytest.mark.parametrize(
+    ("answer", "problem"),
+    [
+        (oversized, "the answer is larger than 66,048 bytes (Content-Length 5,000,000)"),
+        (late, "no complete answer within 0.1 s"),
+    ],
+    ids=["too large", "too late"],
+)
+def test_a_limit_hit_by_the_query_embedding_is_logged_with_its_measure(
+    tmp_path: Path,
+    origin: Origin,
+    caplog: pytest.LogCaptureFixture,
+    answer: Callable[[list[str]], httpx2.Response],
+    problem: str,
+) -> None:
+    embedder = malformed_ollama(answer)
+    memex = service(tmp_path, origin, embedder, embeddings={"query_timeout_seconds": 0.1})
+    try:
+        with caplog.at_level(logging.WARNING, logger="memex_mcp.service"):
+            result = memex.search(ALICE, "degreaser")
+        assert result["semantic"] is False
+        assert f"query embedding failed, keyword search only: {problem}" in caplog.text
     finally:
         memex.index.close()
         embedder.close()
