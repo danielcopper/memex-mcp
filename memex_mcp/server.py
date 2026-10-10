@@ -69,13 +69,11 @@ def build_auth(
 
 
 async def refresh_loop(memex: Memex, interval: float) -> None:
-    """Keep the clone and the index fresh; the first round only fills in vectors."""
+    """Keep the clone, the index and the health state fresh; the first round does not fetch."""
     first = True
     while True:
         try:
-            if not first:
-                await anyio.to_thread.run_sync(memex.refresh)
-            await anyio.to_thread.run_sync(memex.backfill)
+            await anyio.to_thread.run_sync(partial(memex.refresh_round, first))
         except Exception:
             log.exception("refresh round failed; serving the last state")
         first = False
@@ -193,7 +191,8 @@ def build_mcp(
 
     @mcp.custom_route(HEALTH_PATH, methods=["GET"], include_in_schema=False)
     async def health(_request: Request) -> Response:
-        return JSONResponse({"status": "ok"})
+        # Always 200: the container healthcheck asks only whether the server answers.
+        return JSONResponse(memex.health())
 
     return mcp
 
