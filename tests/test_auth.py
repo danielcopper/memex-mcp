@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import socket
@@ -16,7 +18,7 @@ from base64 import urlsafe_b64encode
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import TracebackType
-from typing import Self, TypedDict, cast, override
+from typing import Self, TypedDict, TypeGuard, cast, override
 
 import anyio
 import jwt
@@ -275,6 +277,31 @@ REJECTED: dict[str, ClaimOverrides] = {
 @pytest.mark.parametrize("overrides", REJECTED.values(), ids=list(REJECTED))
 async def test_bad_claims_are_rejected(jwks: FakeJwks, overrides: ClaimOverrides) -> None:
     assert await make_verifier(jwks).verify_token(token(**overrides)) is None
+
+
+WRONG_ISSUERS: dict[str, tuple[object, str]] = {
+    "without the trailing slash": (ISSUER.rstrip("/"), repr(ISSUER.rstrip("/"))),
+    "with a line break": (f"{ISSUER}\nforged", repr(f"{ISSUER}\nforged")),
+    "long": (ISSUER + "x" * 1000, repr(ISSUER + "x" * (200 - len(ISSUER)) + "…")),
+    "not a string": ([ISSUER], "a list"),
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("iss", "shown"), WRONG_ISSUERS.values(), ids=list(WRONG_ISSUERS))
+async def test_a_wrong_issuer_is_logged_at_warning_with_both_issuers(
+    jwks: FakeJwks, iss: object, shown: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Signed as JWS: PyJWT's encode refuses an `iss` that is not a string.
+    payload = json.dumps(claims(iss=iss)).encode()
+    bearer = jwt.PyJWS().encode(payload, KEY, algorithm="RS256", headers={"kid": "k1"})
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(bearer) is None
+    assert warnings_in(caplog) == [
+        f"bearer token rejected: issuer {shown}, expected {ISSUER!r} "
+        + "(a token for another application, or a wrong [auth] issuer)"
+    ]
+    assert bearer not in caplog.text
 
 
 @pytest.mark.anyio
@@ -709,12 +736,12 @@ async def test_a_malformed_entry_does_not_hide_the_good_key(
             assert await verifier.verify_token(token()) is not None
     assert jwks.fetches == 1
     assert warnings_in(caplog) == [
-        "key set entry 0 is a number, not an object; not used",
         "key set entry 1 has kid a list, not a string; no token can name it",
         "key set entry 2 (kid 'k2', kty 'RSA', alg a number) is unusable: PyJWKError; not used",
         "key set entry 3 (kid 'k3', kty null, alg 'RS256') is unusable: InvalidKeyError; not used",
         "key set entry 4 (kid 'k4', kty 'RSA', alg 'RS256') has use 'foo', not 'sig'; not used",
         "key set entry 5 (kid null, kty 'RSA', alg 'RS256') has no kid; not used",
+        "key set entry 0 is a number, not an object; not used",
     ]
 
 
@@ -746,6 +773,47 @@ async def test_unused_entries_are_logged_up_to_ten(
     assert warnings_in(caplog) == [
         *(f"key set entry {index} is a number, not an object; not used" for index in range(10)),
         "and 5 more key set entries not used",
+    ]
+
+
+UNUSABLE_K0 = {**without(GOOD_JWK, "kty"), "kid": "k0"}
+UNUSABLE_K0_LINE = "(kid 'k0', kty null, alg 'RS256') is unusable: InvalidKeyError; not used"
+
+
+@pytest.mark.anyio
+async def test_lines_about_objects_come_before_other_entries(
+    jwks: FakeJwks, caplog: pytest.LogCaptureFixture
+) -> None:
+    use_foo = {**GOOD_JWK, "use": "foo", "kid": "k4"}
+    jwks.answer = answer_json({"keys": [*range(12), UNUSABLE_K0, use_foo, GOOD_JWK, GOOD_JWK]})
+    with caplog.at_level(logging.WARNING, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(token()) is not None
+    assert warnings_in(caplog) == [
+        f"key set entry 12 {UNUSABLE_K0_LINE}",
+        "key set entry 13 (kid 'k4', kty 'RSA', alg 'RS256') has use 'foo', not 'sig'; not used",
+        "key set entry 15 repeats kid 'k1'; PyJWT uses the first",
+        *(f"key set entry {index} is a number, not an object; not used" for index in range(7)),
+        "and 5 more key set entries not used",
+    ]
+
+
+@pytest.mark.anyio
+async def test_debug_lines_never_take_the_place_of_a_warning(
+    jwks: FakeJwks, caplog: pytest.LogCaptureFixture
+) -> None:
+    encryption_keys = [{**ENC_JWK, "kid": f"e{index}"} for index in range(12)]
+    jwks.answer = answer_json({"keys": [*encryption_keys, UNUSABLE_K0, GOOD_JWK]})
+    with caplog.at_level(logging.DEBUG, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(token()) is not None
+    about = "(kid 'e{0}', kty 'RSA', alg 'RSA-OAEP-256') is an encryption key"
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.WARNING, f"key set entry 12 {UNUSABLE_K0_LINE}"),
+        *(
+            (logging.DEBUG, f"key set entry {index} {about.format(index)}; not used")
+            for index in range(10)
+        ),
+        (logging.DEBUG, "and 2 more key set entries not used"),
+        (logging.INFO, f"loaded the key set from {jwks.url}; signing keys 'k1'"),
     ]
 
 
@@ -821,27 +889,142 @@ async def test_a_malformed_member_never_escapes(
     assert verified is not None or len(warnings) == 1
 
 
+# The drift test compares auth.py's signing-key filter with PyJWT's directly, to catch drift on a
+# PyJWT bump; it needs these private names.
+ProviderJwks = memex_mcp.auth._ProviderJwks  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+ENTRY_ERRORS = memex_mcp.auth._ENTRY_ERRORS  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+review = memex_mcp.auth._review  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    ("kty", "member", "value"),
+    FUZZ_CASES,
+    ids=[f"{kty}-{member}-{value}" for kty, member, value in FUZZ_CASES],
+)
+def test_the_signing_keys_are_the_ones_pyjwt_picks(kty: str, member: str, value: str) -> None:
+    """The kids the fetch reports and the keys served from the cache are PyJWT's signing keys.
+
+    The fast path and the review of a fetched set filter the set themselves;
+    this ties both to PyJWT's own filter, so a change of it on a pin bump fails here.
+    """
+    entry = without(FUZZ_BASES[kty], member)
+    if value != MISSING:
+        entry[member] = VALUES[value]
+    document: dict[str, object] = {"keys": [entry, GOOD_JWK]}
+    client = ProviderJwks("http://127.0.0.1/jwks/", timeout=1.0, cooldown=1.0)
+    assert client.jwk_set_cache is not None
+    try:
+        client.jwk_set_cache.put(document)
+    except ENTRY_ERRORS:
+        return  # PyJWT refuses the whole set; a fetch of it fails
+    # Served from the cache just filled, without a fetch.
+    pyjwt_keys = client.get_signing_keys()
+    entries = cast("list[object]", document["keys"])
+    kids, _unusable, _notes = review(entries)
+    assert list(kids) == [key.key_id for key in pyjwt_keys]
+    for kid in ("k0", "k1", "k9"):
+        assert client.cached_key(kid) is client.match_kid(pyjwt_keys, kid)
+
+
+CACHE_ATTRIBUTES = frozenset({"jwk_set_cache", "jwk_set_with_timestamp"})
+
+
+def assigns_none_to_the_cache(node: ast.AST) -> TypeGuard[ast.Assign | ast.AnnAssign]:
+    if isinstance(node, ast.Assign):
+        targets, value = node.targets, node.value
+    elif isinstance(node, ast.AnnAssign):
+        targets, value = [node.target], node.value
+    else:
+        return False
+    return (
+        isinstance(value, ast.Constant)
+        and value.value is None
+        and any(isinstance(t, ast.Attribute) and t.attr in CACHE_ATTRIBUTES for t in targets)
+    )
+
+
+Clearing = ast.Assign | ast.AnnAssign
+
+
+def cache_clearings(tree: ast.Module) -> dict[str, list[Clearing]]:
+    """Every assignment of None to the cache in ``tree``, by the name of the method it is in."""
+    found: dict[str, list[Clearing]] = {}
+    for method in ast.walk(tree):
+        if isinstance(method, ast.FunctionDef):
+            nodes = [node for node in ast.walk(method) if assigns_none_to_the_cache(node)]
+            if nodes:
+                found.setdefault(method.name, []).extend(nodes)
+    return found
+
+
+def shown(found: dict[str, list[Clearing]]) -> dict[str, list[str]]:
+    return {name: [ast.unparse(node) for node in nodes] for name, nodes in found.items()}
+
+
+def test_pyjwt_never_clears_the_cached_key_set() -> None:
+    """The cache is read without the lock, which holds while PyJWT only replaces the set.
+
+    Clearing it would empty the cache while a fetch runs, and a failed fetch would
+    drop a set that is still valid; this fails on a pin bump that adds either.
+
+    It sees, in ``jwt/jwks_client.py``, the first argument of every ``.put(`` call,
+    and in that file and ``jwt/jwk_set_cache.py`` every assignment of None to an
+    attribute named ``jwk_set_cache`` or ``jwk_set_with_timestamp``: only
+    ``__init__`` and the None branch of ``JWKSetCache.put`` may make one. It does
+    not see None passed through a variable, ``setattr`` or ``del``, a change inside
+    the timestamped set, or code in any other module.
+    """
+    client = ast.parse(inspect.getsource(jwt.jwks_client))
+    puts = [
+        node
+        for node in ast.walk(client)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "put"
+    ]
+    assert puts  # the check below would hold for no call at all
+    assert [ast.unparse(node.args[0]) for node in puts] == ["jwk_set"] * len(puts)
+
+    by_client = cache_clearings(client)
+    # __init__ starts without a cache, in both forms: the match sees each.
+    assert {type(node) for node in by_client.pop("__init__", [])} == {ast.Assign, ast.AnnAssign}
+    assert shown(by_client) == {}
+
+    cache = ast.parse(inspect.getsource(jwt.jwk_set_cache))
+    by_cache = cache_clearings(cache)
+    assert {type(node) for node in by_cache.pop("__init__", [])} == {ast.AnnAssign}
+    in_put = by_cache.pop("put", [])
+    assert shown(by_cache) == {}
+    # put(None) is how the cache clears itself on request; jwks_client.py never asks.
+    branches = [
+        node
+        for node in ast.walk(cache)
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "jwk_set is None"
+    ]
+    in_branch = [
+        node for branch in branches for node in ast.walk(branch) if assigns_none_to_the_cache(node)
+    ]
+    assert in_branch  # the match sees put's own clearing
+    assert [node.lineno for node in in_put] == [node.lineno for node in in_branch]
+
+
 HINT = "; is [auth] jwks_url the provider's JWKS endpoint?"
 REFUSED = (
     '; an entry makes PyJWT refuse the whole set (alg "none", an alg that is not a string, '
     + "or an oct key without k)"
 )
 NO_USABLE_KEYS = "PyJWKSetError: The JWK Set did not contain any usable keys."
+NOT_FOUND = "; check [auth] jwks_url, by default the issuer's path plus jwks/"
 
 # What the endpoint answers -> how the cause the warning names begins (its
 # type, plus PyJWT's message, but never Python's wording, which changes between
 # versions), and what the warning adds: the jwks_url hint when the endpoint
 # answered, but not with a usable key set; what PyJWT refused when one entry
-# fails the set; nothing for a connection error.
-FETCH_FAILURES: dict[str, tuple[Answer, str | tuple[str, ...], str]] = {
+# fails the set; where the path comes from for a 404; nothing for any other
+# connection error.
+FETCH_FAILURES: dict[str, tuple[Answer, str, str]] = {
     "not JSON": (answer_raw(b"<html>login</html>"), "JSONDecodeError: ", HINT),
     "not UTF-8": (answer_raw(b"\xff\xfe\x00"), "UnicodeDecodeError: ", HINT),
-    # Depending on the Python build, json runs out of stack or reports a syntax error.
-    "nested too deeply": (
-        answer_raw(b"[" * 100_000),
-        ("RecursionError: ", "JSONDecodeError: "),
-        HINT,
-    ),
     "not an object": (
         answer_json([GOOD_JWK]),
         "PyJWKClientError: The JWKS endpoint did not return a JSON object",
@@ -876,11 +1059,7 @@ FETCH_FAILURES: dict[str, tuple[Answer, str | tuple[str, ...], str]] = {
         "KeyError: 'k'",
         REFUSED,
     ),
-    "not found": (
-        answer_raw(b"", status=404),
-        CONNECTION_ERROR,
-        "",
-    ),
+    "not found": (answer_raw(b"", status=404), CONNECTION_ERROR, NOT_FOUND),
     "redirect": (
         answer_raw(b"", status=302),
         CONNECTION_ERROR,
@@ -898,7 +1077,7 @@ FETCH_FAILURES: dict[str, tuple[Answer, str | tuple[str, ...], str]] = {
 async def test_a_failed_fetch_rejects_the_token_with_one_warning(
     jwks: FakeJwks,
     answer: Answer,
-    cause: str | tuple[str, ...],
+    cause: str,
     explanation: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -907,16 +1086,64 @@ async def test_a_failed_fetch_rejects_the_token_with_one_warning(
     with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
         assert await make_verifier(jwks).verify_token(bearer) is None
     [warning] = warnings_in(caplog)
-    causes = (cause,) if isinstance(cause, str) else cause
-    assert warning.startswith(
-        tuple(f"cannot load the key set from {jwks.url}: {c}" for c in causes)
-    )
+    assert warning.startswith(f"cannot load the key set from {jwks.url}: {cause}")
     assert warning.count(jwks.url) == 1
     assert (HINT in warning) is (explanation == HINT)
     assert (REFUSED in warning) is (explanation == REFUSED)
+    assert (NOT_FOUND in warning) is (explanation == NOT_FOUND)
     assert warning.endswith(f"{explanation}; {ALL_REJECTED}; {NO_FETCH_FOR}")
     assert caplog.messages[-1] == REJECTED_UNFETCHED
     assert bearer not in caplog.text
+
+
+def not_found_with_a_forged_reason(handler: BaseHTTPRequestHandler) -> None:
+    """A 404 whose reason phrase carries a terminal escape and thousands of characters."""
+    handler.send_response(404, "\x1b[31m" + "x" * 3000)
+    handler.send_header("content-length", "0")
+    handler.end_headers()
+
+
+@pytest.mark.anyio
+async def test_the_cause_of_a_failed_fetch_is_escaped_and_cut(
+    jwks: FakeJwks, caplog: pytest.LogCaptureFixture
+) -> None:
+    jwks.answer = not_found_with_a_forged_reason
+    with caplog.at_level(logging.WARNING, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(token()) is None
+    [warning] = warnings_in(caplog)
+    cause = f'{CONNECTION_ERROR}"HTTP Error 404: \\x1b[31m'
+    assert warning.startswith(f"cannot load the key set from {jwks.url}: {cause}")
+    assert "\x1b" not in warning
+    shown = 200 - len('Fail to fetch data from the url, err: "HTTP Error 404: \x1b[31m')
+    assert f"{'x' * shown}…{NOT_FOUND}" in warning
+    assert "x" * (shown + 1) not in warning
+
+
+class JsonOutOfStack:
+    """Stands in for the ``json`` module where PyJWT decodes the key set: it runs out of stack.
+
+    How deep a document must be for that depends on the Python build and the
+    stack size (one that overflows an 8 MB stack parses with 16 MB, and then
+    fails as "not an object"), so the error is raised here instead.
+    """
+
+    @staticmethod
+    def load(_answer: object) -> object:
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+
+
+@pytest.mark.anyio
+async def test_a_key_set_nested_too_deeply_fails_the_fetch(
+    jwks: FakeJwks, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(jwt.jwks_client, "json", JsonOutOfStack)
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(token()) is None
+    assert warnings_in(caplog) == [
+        f"cannot load the key set from {jwks.url}: RecursionError: maximum recursion depth "
+        + f"exceeded while decoding a JSON array{HINT}; {ALL_REJECTED}; {NO_FETCH_FOR}"
+    ]
+    assert caplog.messages[-1] == REJECTED_UNFETCHED
 
 
 @pytest.mark.anyio
@@ -951,6 +1178,76 @@ async def test_an_unknown_kid_is_logged_at_info(
         "bearer token rejected: no signing key for kid 'k9'",
     ]
     assert warnings_in(caplog) == []
+
+
+USE_FOO_K0 = {**GOOD_JWK, "use": "foo", "kid": "k0"}
+ENC_K0 = {**ENC_JWK, "kid": "k0"}
+NOT_USED = (
+    "bearer token rejected: no signing key for kid 'k0': the set names the kid, but its entry"
+)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("entry", "why"),
+    [
+        (UNUSABLE_K0, "is unusable: InvalidKeyError"),
+        (USE_FOO_K0, "has use 'foo', not 'sig'"),
+        (ENC_K0, "is an encryption key"),
+    ],
+    ids=["unusable", "use foo", "encryption key"],
+)
+async def test_a_kid_whose_entry_is_not_used_says_so(
+    jwks: FakeJwks, entry: dict[str, object], why: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    jwks.answer = answer_json({"keys": [entry, GOOD_JWK]})
+    verifier = make_verifier(jwks)
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        # The reason comes with every token that names the kid, not only the first.
+        for _ in range(2):
+            assert await verifier.verify_token(token(kid="k0")) is None
+        assert await verifier.verify_token(token(kid="k9")) is None
+    rejections = [m for m in caplog.messages if m.startswith("bearer token rejected")]
+    assert rejections == [f"{NOT_USED} {why}"] * 2 + [
+        "bearer token rejected: no signing key for kid 'k9'"
+    ]
+
+
+@pytest.mark.anyio
+async def test_of_several_unused_entries_for_a_kid_the_first_gives_the_reason(
+    jwks: FakeJwks, caplog: pytest.LogCaptureFixture
+) -> None:
+    jwks.answer = answer_json({"keys": [ENC_K0, USE_FOO_K0, UNUSABLE_K0, GOOD_JWK]})
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        assert await make_verifier(jwks).verify_token(token(kid="k0")) is None
+    assert caplog.messages[-1] == f"{NOT_USED} is an encryption key"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("later", "reason"),
+    [
+        ([GOOD_JWK], ""),
+        ([ENC_K0, GOOD_JWK], ": the set names the kid, but its entry is an encryption key"),
+    ],
+    ids=["entry gone", "entry unused for another reason"],
+)
+async def test_a_refetch_replaces_what_is_known_about_unused_entries(
+    jwks: FakeJwks,
+    clock: Clock,
+    later: list[dict[str, object]],
+    reason: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    jwks.answer = answer_json({"keys": [USE_FOO_K0, GOOD_JWK]})
+    verifier = make_verifier(jwks)
+    assert await verifier.verify_token(token(kid="k0")) is None
+    jwks.answer = answer_json({"keys": later})
+    clock.now += JWKS_LIFESPAN_SECONDS + 1
+    with caplog.at_level(logging.INFO, logger="memex_mcp.auth"):
+        assert await verifier.verify_token(token(kid="k0")) is None
+    assert jwks.fetches == 2
+    assert caplog.messages[-1] == f"bearer token rejected: no signing key for kid 'k0'{reason}"
 
 
 @pytest.mark.anyio

@@ -21,7 +21,9 @@ import hashlib
 import json
 import logging
 import time
+from http import HTTPStatus
 from typing import cast, override
+from urllib.error import HTTPError
 
 import anyio
 import jwt
@@ -44,10 +46,11 @@ JWKS_LIFESPAN_SECONDS = 300
 # What a fetch was seen to raise besides PyJWT's own errors at PyJWT 2.15.1
 # (tests/test_auth.py tries every member of each key type): OSError for a
 # connection reset while the answer is read, ValueError for an answer that is
-# not JSON, RecursionError for one nested too deeply (on some Python builds a
-# ValueError instead), and, out of a key entry, TypeError for an `alg` that is
-# not a string, NotImplementedError for `alg` "none" and KeyError for an `oct`
-# key without `k`. Each fails the whole set.
+# not JSON, RecursionError for one nested too deeply (how deep depends on the
+# Python build and the stack size; with enough stack such a document parses and
+# fails like any other malformed set), and, out of a key entry, TypeError for an
+# `alg` that is not a string, NotImplementedError for `alg` "none" and KeyError
+# for an `oct` key without `k`. Each fails the whole set.
 _FETCH_ERRORS = (
     jwt.PyJWTError,
     OSError,
@@ -59,6 +62,11 @@ _FETCH_ERRORS = (
 )
 
 _HINT = "; is [auth] jwks_url the provider's JWKS endpoint?"
+# The derived jwks_url follows the issuer, so a wrong issuer path ends here too.
+_NOT_FOUND = "; check [auth] jwks_url, by default the issuer's path plus jwks/"
+
+# What a token with an issuer other than [auth] issuer most likely is.
+_ISSUER_CAUSES = "(a token for another application, or a wrong [auth] issuer)"
 
 # What PyJWT raises out of a single entry when that entry makes it refuse the
 # whole set (see _FETCH_ERRORS); no other fetch was seen to raise these.
@@ -70,13 +78,26 @@ _ENTRY_REFUSED = (
 
 # Log lines carry at most this much of a kid.
 _KID_CHARS = 64
+# ... and of a token's issuer, enough to show where it differs from the configured one.
+_ISSUER_CHARS = 200
+# ... and of an exception's text, which can quote what the endpoint answered.
+_TEXT_CHARS = 200
 
 # A fetched set logs at most this many lines about entries it will not use.
 _ENTRY_LINES = 10
 
 
-def _clip(text: str) -> str:
-    return text if len(text) <= _KID_CHARS else text[:_KID_CHARS] + "…"
+def _clip(text: str, chars: int = _KID_CHARS) -> str:
+    return text if len(text) <= chars else text[:chars] + "…"
+
+
+def _escaped(text: str, chars: int) -> str:
+    """``text`` cut to ``chars`` characters, backslashes and all but printable ASCII escaped.
+
+    Unlike ``repr`` it adds no quotes, so a message that needs no escaping reads as before.
+    """
+    escaped = text[:chars].encode("unicode_escape").decode("ascii")
+    return escaped if len(text) <= chars else escaped + "…"
 
 
 def _member(value: object) -> str:
@@ -84,9 +105,21 @@ def _member(value: object) -> str:
     return repr(_clip(value)) if isinstance(value, str) else json_kind(value)
 
 
+def _issuer_of(token: str) -> str:
+    """The token's `iss` for a log line, clipped, or its kind if it is not a string."""
+    claims = cast("dict[str, object]", jwt.decode(token, options={"verify_signature": False}))
+    issuer = claims.get("iss")
+    return repr(_clip(issuer, _ISSUER_CHARS)) if isinstance(issuer, str) else json_kind(issuer)
+
+
 def _is_signing_key(key: jwt.PyJWK) -> bool:
     """What PyJWKClient keeps as a signing key: `use` "sig" or absent, and a kid."""
     return key.public_key_use in ("sig", None) and bool(key.key_id)
+
+
+def _about(entry: dict[str, object]) -> str:
+    """The members that tell key set entries apart, for a log line."""
+    return ", ".join(f"{name} {_member(entry.get(name))}" for name in ("kid", "kty", "alg"))
 
 
 def _unused(entry: object) -> tuple[int, str] | None:
@@ -94,32 +127,45 @@ def _unused(entry: object) -> tuple[int, str] | None:
     if not isinstance(entry, dict):
         return logging.WARNING, f"is {json_kind(entry)}, not an object"
     data = cast("dict[str, object]", entry)  # a JSON object's keys are strings
-    about = ", ".join(f"{name} {_member(data.get(name))}" for name in ("kid", "kty", "alg"))
     use = data.get("use")
     if use == "enc":
         # Authentik lists its encryption key here when one is set.
-        return logging.DEBUG, f"({about}) is an encryption key"
+        return logging.DEBUG, "is an encryption key"
     try:
         key = jwt.PyJWK(data)
     except jwt.PyJWTError as exc:
         # Only the type: PyJWT's messages may quote the whole key.
-        return logging.WARNING, f"({about}) is unusable: {type(exc).__name__}"
+        return logging.WARNING, f"is unusable: {type(exc).__name__}"
     if _is_signing_key(key):
         return None
     if not key.key_id:
-        return logging.WARNING, f"({about}) has no kid"
-    return logging.WARNING, f"({about}) has use {_member(use)}, not 'sig'"
+        return logging.WARNING, "has no kid"
+    return logging.WARNING, f"has use {_member(use)}, not 'sig'"
 
 
-def _review(entries: list[object]) -> tuple[tuple[object, ...], list[tuple[int, str]]]:
-    """The kids of the signing keys in a fetched set, and a log line for every other entry."""
+def _review(
+    entries: list[object],
+) -> tuple[tuple[object, ...], dict[str, str], list[tuple[int, str]]]:
+    """The kids of the signing keys in a fetched set, the reason by kid for the entries it
+    will not use, and a log line for every other entry: the ones about objects first.
+    """
     kids: list[object] = []
+    unusable: dict[str, str] = {}
     notes: list[tuple[int, str]] = []
+    # Lines about entries that are not even objects come after the others.
+    junk: list[tuple[int, str]] = []
     for index, entry in enumerate(entries):
         unused = _unused(entry)
         if unused is not None:
             level, why = unused
-            notes.append((level, f"key set entry {index} {why}; not used"))
+            if not isinstance(entry, dict):
+                junk.append((level, f"key set entry {index} {why}; not used"))
+                continue
+            data = cast("dict[str, object]", entry)
+            notes.append((level, f"key set entry {index} ({_about(data)}) {why}; not used"))
+            kid = data.get("kid")
+            if isinstance(kid, str) and kid:
+                unusable.setdefault(kid, why)
             continue
         kid = cast("dict[str, object]", entry)["kid"]
         if not isinstance(kid, str):
@@ -129,16 +175,31 @@ def _review(entries: list[object]) -> tuple[tuple[object, ...], list[tuple[int, 
             why = f"repeats kid {_member(kid)}; PyJWT uses the first"
             notes.append((logging.WARNING, f"key set entry {index} {why}"))
         kids.append(kid)
-    return tuple(kids), notes
+    return tuple(kids), unusable, notes + junk
 
 
 def _log_notes(notes: list[tuple[int, str]]) -> None:
-    for level, note in notes[:_ENTRY_LINES]:
-        log.log(level, "%s", note)
-    rest = notes[_ENTRY_LINES:]
-    if rest:
-        level = max(level for level, _note in rest)
-        log.log(level, "and %d more key set entries not used", len(rest))
+    """Up to ``_ENTRY_LINES`` lines per level, the more severe level first, so lines at a
+    level the log leaves out never take the place of one it shows.
+    """
+    for level in sorted({level for level, _note in notes}, reverse=True):
+        lines = [note for note_level, note in notes if note_level == level]
+        for line in lines[:_ENTRY_LINES]:
+            log.log(level, "%s", line)
+        if len(lines) > _ENTRY_LINES:
+            log.log(level, "and %d more key set entries not used", len(lines) - _ENTRY_LINES)
+
+
+def _explanation(exc: Exception) -> str:
+    """What the failure of a fetch says about the configuration, for the log line."""
+    # PyJWT reports an HTTP error status as a connection error caused by urllib's HTTPError.
+    if isinstance(exc.__cause__, HTTPError) and exc.__cause__.code == HTTPStatus.NOT_FOUND:
+        return _NOT_FOUND
+    if isinstance(exc, jwt.PyJWKClientConnectionError | OSError):
+        return ""  # says nothing about what the endpoint is
+    if isinstance(exc, _ENTRY_ERRORS):
+        return _ENTRY_REFUSED
+    return _HINT
 
 
 class _KeySetUnavailable(jwt.PyJWKClientError):
@@ -171,11 +232,16 @@ class _ProviderJwks(jwt.PyJWKClient):
         self._failures: int = 0
         self._entries: str | None = None
         self._kids: tuple[object, ...] | None = None
+        self._unusable: dict[str, str] = {}
 
     @property
     def has_no_signing_key(self) -> bool:
         """Whether the last fetched set held no key PyJWKClient would sign with."""
         return self._kids == ()
+
+    def unused_entry(self, kid: str) -> str | None:
+        """Why the entry with ``kid`` in the last fetched set is not used; None if none is."""
+        return self._unusable.get(kid)
 
     def cached_key(self, kid: str) -> jwt.PyJWK | None:
         """The signing key for ``kid`` from a cached set that has not expired, or None.
@@ -214,18 +280,12 @@ class _ProviderJwks(jwt.PyJWKClient):
         else:
             left = cached.get_timestamp() + cache.lifespan - now
             consequence = f"the cached key set stays in use for another {left:.0f} s"
-        if isinstance(exc, jwt.PyJWKClientConnectionError | OSError):
-            explanation = ""  # says nothing about what the endpoint is
-        elif isinstance(exc, _ENTRY_ERRORS):
-            explanation = _ENTRY_REFUSED
-        else:
-            explanation = _HINT
         log.warning(
             "cannot load the key set from %s: %s: %s%s; %s; no new fetch for %g s",
             self.uri,
             type(exc).__name__,
-            str(exc) or "no detail",
-            explanation,
+            _escaped(str(exc), _TEXT_CHARS) or "no detail",
+            _explanation(exc),
             consequence,
             self._wait,
         )
@@ -236,7 +296,7 @@ class _ProviderJwks(jwt.PyJWKClient):
         if digest == self._entries and self._kids is not None:
             return self._kids
         self._entries = digest
-        kids, notes = _review(entries)
+        kids, self._unusable, notes = _review(entries)
         _log_notes(notes)
         return kids
 
@@ -312,6 +372,8 @@ class AuthentikTokenVerifier(TokenVerifier):
                 reason = ": the key set could not be fetched"
             elif self._jwks.has_no_signing_key:
                 reason = ": the key set has no signing key"
+            elif (why := self._jwks.unused_entry(kid)) is not None:
+                reason = f": the set names the kid, but its entry {why}"
             else:
                 reason = ""
             log.info("bearer token rejected: no signing key for kid %r%s", _clip(kid), reason)
@@ -338,8 +400,15 @@ class AuthentikTokenVerifier(TokenVerifier):
             # stops a token "signed" with HS256 and the public key.
             log.info("bearer token rejected: %s token for a %s key", alg, key.algorithm_name)
             return None
+        claims = self._claims(token, key, alg)
+        if claims is None:
+            return None
+        return self._access_token(token, claims)
+
+    def _claims(self, token: str, key: jwt.PyJWK, alg: str) -> dict[str, object] | None:
+        """The token's claims once PyJWT has checked them, or None with one log line saying why."""
         try:
-            claims = cast(
+            return cast(
                 "dict[str, object]",
                 jwt.decode(
                     token,
@@ -351,10 +420,21 @@ class AuthentikTokenVerifier(TokenVerifier):
                     options={"require": REQUIRED_CLAIMS},
                 ),
             )
+        except jwt.InvalidIssuerError:
+            # PyJWT checks the claims only after the signature, so a key in the
+            # provider's set signed this token. Authentik providers often share one
+            # signing certificate (and kid), so a token issued for another
+            # application ends here too, not only a wrong [auth] issuer.
+            log.warning(
+                "bearer token rejected: issuer %s, expected %r %s",
+                _issuer_of(token),
+                self.issuer,
+                _ISSUER_CAUSES,
+            )
+            return None
         except jwt.PyJWTError as exc:
             log.info("bearer token rejected: %s", exc)
             return None
-        return self._access_token(token, claims)
 
     def _access_token(self, token: str, claims: dict[str, object]) -> AccessToken | None:
         azp = claims.get("azp")
