@@ -1,4 +1,4 @@
-# memex-mcp: the read-only MCP server over a memex clone.
+# memex-mcp: the MCP server over a memex clone.
 # Runs as an unprivileged user with a read-only root filesystem: the clone and
 # the index live on a volume (/data), git and Python only need a writable /tmp.
 

@@ -1,9 +1,10 @@
 # The memex format
 
 The shared convention for everyone who writes to a memex repository: memex-mcp, and clients that keep their own clone (a
-sync script on a laptop, an editor such as Obsidian, an assistant working in the clone). memex-mcp enforces part of it
-for the writes that go through it; a client with a clone has to follow it on its own. The
-[last section](#what-the-server-enforces) says which is which.
+sync script on a laptop, an editor such as Obsidian, an assistant working in the clone). memex-mcp enforces it for the
+writes that go through it, and enforces more than a client has to follow; the [last section](#who-follows-what) says
+which rule binds whom. How the server itself writes, pushes and reports is described under
+[Writing](../README.md#architecture) in the README.
 
 ## Layout
 
@@ -17,16 +18,17 @@ Each area holds two folders:
 
 A **topic** is a folder directly under `<area>/memory/` or `<area>/wiki/`, for example `alice/memory/homelab/` or
 `alice/wiki/networking/`. A topic may have subfolders; they belong to it. Notes directly in `<area>/memory/` belong to
-that folder itself, which then acts as a topic of its own. New wiki notes go into a topic folder, never directly into
-`<area>/wiki/`, whose only index is the master index of topics; notes already there can still be changed.
+that folder itself, which then acts as a topic of its own. Wiki notes belong in a topic folder: memex-mcp creates none
+directly in `<area>/wiki/`, whose only index is the master index of topics, but notes already there can still be
+changed.
 
 Two folder names have a meaning wherever they appear:
 
-- `daily/` holds daily notes, one file per day, for example `alice/memory/daily/2026-10-10.md`. Daily notes are not
-  listed in an index.
+- `daily/` holds daily notes, for example `alice/memory/daily/2026-10-10.md`. Daily notes are not listed in an index.
 - `archive/` holds historical notes. Search ranks them lower and marks them `archived`.
 
-Notes are Markdown files ending in `.md`, in UTF-8. Hidden files and folders (`.git`, `.obsidian`) are not notes.
+Notes are Markdown files ending in `.md`, in UTF-8. Hidden files and folders (`.git`, `.obsidian`) are not notes. A
+note's title is its first level-one heading (`# DNS`) outside code blocks, else its file name without `.md`.
 
 ```text
 alice/
@@ -49,40 +51,42 @@ household/
 
 ## Indexes
 
-Each topic has one index file: `MEMORY.md` in memory, `_index.md` in the wiki. An area's wiki also has
+Each topic has one index file: `MEMORY.md` in memory, `_index.md` in the wiki, in the topic folder. A note is listed in
+its topic's index, also when it lies in a subfolder of the topic; an index file in a subfolder is not used. Notes
+directly in `<area>/memory/` are listed in `<area>/memory/MEMORY.md`. An area's wiki also has
 `<area>/wiki/_master-index.md`, which lists its topics.
 
-The index of a note is the index file in the note's own folder; if there is none, the nearest one above it, up to the
-topic folder. A note in `alice/memory/homelab/network/` is listed in `alice/memory/homelab/MEMORY.md` unless `network/`
-has its own `MEMORY.md`.
-
-An index is split into **sections** by level-two headings (`## Services`). Its lines are list items in one of two
+An index is split into **sections** by level-two headings (`## Services`). A section name is one line of at most 100
+characters, under the same character rules as a description (below). The lines of an index are list items in these
 formats:
 
-| Index        | Line                                 | Example                                        |
-| ------------ | ------------------------------------ | ---------------------------------------------- |
-| `MEMORY.md`  | `- [<path>](<path>) — <description>` | `- [network/vlan.md](network/vlan.md) — VLANs` |
-| `_index.md`  | `- [[<name>]] — <description>`       | `- [[dhcp]] — leases and reservations`         |
-| master index | `- [[wiki/<topic>/_index\|<topic>]]` | `- [[wiki/networking/_index\|networking]]`     |
+| Index        | Line                                                 | Example                                                   |
+| ------------ | ---------------------------------------------------- | --------------------------------------------------------- |
+| `MEMORY.md`  | `- [<path>](<path>) — <description>`                 | `- [network/vlan.md](network/vlan.md) — VLANs`            |
+| `_index.md`  | `- [[<name>]] — <description>`                       | `- [[dhcp]] — leases and reservations`                    |
+| master index | `- [[wiki/<topic>/_index\|<topic>]] — <description>` | `- [[wiki/networking/_index\|networking]] — home network` |
 
-- In `MEMORY.md` the path is relative to the index's folder; a path with spaces or brackets goes in angle brackets:
-  `- [my note.md](<my note.md>) — …`.
+- In `MEMORY.md` the path is relative to the topic folder; a path with whitespace, parentheses or angle brackets goes in
+  angle brackets: `- [my note.md](<my note.md>) — …`.
 - In `_index.md` the name is the note's file name without `.md`, the way Obsidian links it.
 - Master index links start at the area folder.
-- The description is one line of at most 300 characters.
+- The description is one line of at most 300 characters; the limit counts the description alone, not the whole line. It
+  holds no control or format characters (such as bidi overrides), no `<!--`, and no `@` at the start of a word: Claude
+  Code reads `@path` in a `MEMORY.md` it loads as a file to load as well.
 
 **Adding a note.** Whoever creates a note adds its line in the same commit, at the end of a section they choose. A
 section whose name equals an existing one ignoring case is that section; a section that does not exist yet is added at
 the end of the index. When the topic has no index yet, the writer creates it with a heading naming the topic
 (`# networking`; for `<area>/memory/` itself, `# <area> memory`). For a new wiki topic, the writer also adds the topic's
-line at the end of the master index and creates the master index (`# Wiki master index`) if it is missing.
+line, with a description of the topic, at the end of the master index's first section (at the end of the file when it
+has no section), and creates the master index (`# Wiki master index` with a section `## Topics`) if it is missing.
 
 Reordering, rewording and removing index lines are left to a cleanup run started by a person. Deleting a note leaves its
 line in place until then.
 
 ## Frontmatter
 
-A note may begin with a YAML block:
+A note may begin with a YAML block, for example:
 
 ```markdown
 ---
@@ -92,19 +96,21 @@ description: The resolver, its upstreams and the local zone
 ---
 ```
 
-`name` equals the file name without `.md`. Dates are not part of the frontmatter: when a note was created and last
-changed comes from git (the author dates of the first and the last commit touching it), and memex-mcp returns both with
-every search hit and `read`.
+memex-mcp neither reads nor checks it. Dates are not part of the frontmatter: memex-mcp takes them from git and returns
+them with every search hit and `read`. `created` is the author date of the first commit touching the note, when it was
+written; `updated` is the commit date of the last one, when the last change landed, so a change that was written earlier
+and rebased onto newer commits counts as late as it landed.
 
 Planned, not yet in use: `supersedes:` and `superseded-by:`, which will link a note to a revised version written as a
 new note.
 
 ## Protected files
 
-- `CLAUDE.md` and `AGENTS.md`, in any folder, are loaded into every assistant session that opens the folder. memex-mcp
-  never creates, changes or deletes them; in a clone, only a person changes them on purpose.
-- Index files (`MEMORY.md`, `_index.md`, `_master-index.md`) change only by the line added for a new note, and by
-  cleanup.
+- `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`, in any folder, are read by assistants (Claude Code and others) that
+  open the folder. memex-mcp never creates, changes or deletes them, nor a folder of such a name, in any letter case.
+- Index files (`MEMORY.md`, `_index.md`, `_master-index.md`) change only through creating a note, which adds the note's
+  line and, when needed, creates the index, a section or the topic's master index line; and through cleanup. memex-mcp
+  treats these names like the protected ones: in any letter case, and as folder names too.
 
 ## Commits
 
@@ -123,9 +129,8 @@ One commit per change. The message is English, with no type or scope:
   ```
 
 The writer is the program that commits: `memex-mcp` for the server, the machine's name for a clone (`laptop`). The
-actions are `create`, `update`, `append` and `delete`. The commit's author is who stands behind the change; memex-mcp
-sets the calling person (their username, and an e-mail address from `write.author_email`) and commits as itself. A
-message never carries a note's content.
+actions are `create`, `update`, `append` and `delete`. The commit's author is who stands behind the change; the
+committer is the writer. A message never carries a note's content.
 
 ## Sync and conflicts
 
@@ -134,26 +139,26 @@ own commits onto the remote.
 
 When that rebase conflicts, the writer pushes its own state to a branch `conflict/<writer>-<date>`, for example
 `conflict/memex-mcp-2026-10-10` (`-2`, `-3` for further conflicts on the same day), goes on from the remote's state, and
-tells a person. memex-mcp reports `"repo":"conflict"` on `/healthz` while one of its conflict branches exists. A person
-resolves the conflict and deletes the branch.
+tells a person. Resolving the conflict and then deleting the branch is up to a person; memex-mcp reports
+`"repo":"conflict"` on `/healthz` while one of its own conflict branches exists.
 
-memex-mcp itself works like this: it commits and pushes within each write. When the remote turns the push down because
-it has newer commits, memex-mcp fetches and applies the write again on the new state, up to three times; when the remote
-cannot be reached, the commit stays in its clone and the refresh loop pushes it later, rebasing it as above.
+## Who follows what
 
-## What the server enforces
+A client with a clone must follow three rules: the commit message format, the conflict branches, and a new note's index
+line in the commit that creates the note. Every other rule holds only for writes through memex-mcp.
 
-| Rule                                                             | memex-mcp, for writes through it | A client with a clone |
-| ---------------------------------------------------------------- | -------------------------------- | --------------------- |
-| Write only in your own areas                                     | enforced                         | must follow           |
-| Write only `.md` notes below `<area>/memory/` or `<area>/wiki/`  | enforced                         | must follow           |
-| No hidden files, no symlinks                                     | enforced                         | must follow           |
-| Protected files                                                  | enforced                         | must follow           |
-| New wiki notes only in a topic folder                            | enforced                         | must follow           |
-| A new note's index line, in the same commit                      | enforced                         | must follow           |
-| A note at most 64 KiB after a write (`write.max_note_bytes`)     | enforced                         | recommended           |
-| No machine secrets (private keys, access tokens) in written text | enforced                         | recommended           |
-| Commit messages, conflict branches                               | done                             | must follow           |
+| Rule                                                                      | memex-mcp, for writes through it | A client with a clone |
+| ------------------------------------------------------------------------- | -------------------------------- | --------------------- |
+| Commit messages, conflict branches                                        | done                             | must follow           |
+| A new note's index line, in the same commit                               | enforced                         | must follow           |
+| Write only in your own areas                                              | enforced                         | —                     |
+| Write only `.md` notes below `<area>/memory/` or `<area>/wiki/`           | enforced                         | —                     |
+| No hidden files, no symlinks                                              | enforced                         | —                     |
+| Protected files and index files                                           | enforced                         | —                     |
+| New wiki notes only in a topic folder                                     | enforced                         | —                     |
+| A note at most 64 KiB after a write (`write.max_note_bytes`)              | enforced                         | —                     |
+| No machine secrets (private keys, access tokens) in written text or paths | enforced                         | —                     |
+| Index texts without control or format characters, `<!--` or a leading `@` | enforced                         | —                     |
 
 git has no rights per folder: whoever has a clone can read and write every area. The rights hold only for access through
 memex-mcp.

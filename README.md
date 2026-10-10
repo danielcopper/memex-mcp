@@ -5,20 +5,23 @@ provider.
 
 The memory ("memex") is a git repository of Markdown notes with one top-level directory per area: a private area per
 person (`alice/`, `bob/`) and a shared one (`household/`). Assistants such as Claude Code reach it through this server,
-which searches the notes by keyword and by meaning, returns short snippets, reads single notes, writes notes as commits,
-and lets each caller see and change only their own areas. People with a clone of their own write to the repository
-directly; [docs/memex-format.md](docs/memex-format.md) is the convention both follow.
+which searches the notes by keyword and by meaning, returns short snippets, reads single notes, writes notes as commits
+once writing is switched on (`write.enabled`), and lets each caller see and change only their own areas. People with a
+clone of their own write to the repository directly; [docs/memex-format.md](docs/memex-format.md) is the convention both
+follow.
 
 ## Architecture
 
 **Clone and index.** The server owns a clone of the memex repository. At start it clones it if needed and builds a
 SQLite search index of the configured areas (the users' areas and the household area; other top-level folders are not
 read); the index is a cache on a volume, never committed, and rebuilt from scratch when it is missing, its schema
-version differs, or the set of configured areas changed. Every 60 seconds a background loop runs `git fetch`, brings the
-clone onto the remote (`git merge --ff-only`, or a rebase of commits the server could not push yet, which it then
-pushes) and re-indexes exactly the paths that changed between the old and the new HEAD. A failed fetch is logged and the
-last state keeps serving. The index also keeps each note's dates from git: when it was created and last changed, as the
-author dates of the first and the last commit touching it.
+version differs, or the set of configured areas changed. The server owns its clone: at start it drops whatever was never
+committed (a crash between writing a note and committing it), and before each round it ends a rebase left behind. Every
+60 seconds a background loop runs `git fetch`, brings the clone onto the remote (`git merge --ff-only`, or, with writing
+on, a rebase of commits the server could not push yet, which it then pushes) and re-indexes exactly the paths that
+changed between the old and the new HEAD. A failed fetch is logged and the last state keeps serving. The index also
+keeps each note's dates from git: `created` is the author date of the first commit touching it, `updated` the commit
+date of the last one, so a change rebased onto newer commits counts from when it landed.
 
 **Search.** Notes are split into chunks by heading and then by paragraph. Each chunk is indexed twice: in its area's own
 FTS5 table (bm25 ranking) and, once the embedder has answered, as a vector (Ollama, model `bge-m3`) compared with
@@ -31,24 +34,31 @@ runs on keywords alone, says so in the result (`semantic: false` plus a `notice`
 instead of waiting on every query. Vectors for new or changed chunks are filled in by the background loop, so an
 embedder that is off does not hold up the keyword index.
 
-**Writing.** Each write is one commit in the server's clone, pushed within the call: the caller is the commit's author
-(their username, and an e-mail address from `write.author_email`), the server its committer (`memex-mcp`). The message
-names the action and the path, never the content (`memex-mcp: append alice/memory/daily/2026-10-10.md`). The answer says
-whether the push went through. When the remote has commits the clone lacks, the server fetches and applies the write
-again on that state, up to three times; a write that no longer fits (the passage to replace is gone, the note changed
-since it was read, the path is taken) fails with that reason. When the remote cannot be reached, the commit stays in the
-clone, the answer says "saved, not yet pushed", and the refresh loop pushes it later. If commits the loop has to rebase
-conflict with the remote, it pushes them to a branch `conflict/memex-mcp-<date>`, logs an error, follows the remote
-again and reports `conflict` on `/healthz` until that branch is deleted. One lock serialises the writes and the loop's
-rebasing and pushing; the loop's fetch runs outside it. After the commit the server re-indexes the touched notes, so
-search shows the change at once; should that fail, the write still counts and search catches up in the next round.
+**Writing.** Writing is off unless `write.enabled` is set: then the server offers no write tools, names none in its
+instructions, and runs with a credential that can only read. With writing on, each write is one commit in the server's
+clone, pushed within the call: the caller is the commit's author (their username, and an e-mail address from
+`write.author_email`), the server its committer (`memex-mcp`). The message names the action and the path, never the
+content (`memex-mcp: append alice/memory/daily/2026-10-10.md`). The answer says whether the push went through. When the
+remote has commits the clone lacks, the server fetches and applies the write again on that state, up to three times; a
+write that no longer fits (the passage to replace is gone, the note changed since it was read, the path is taken) fails
+with that reason. When the remote cannot be reached, the commit stays in the clone, the answer says it is saved but not
+yet pushed, and every refresh round tries to push it again. When the remote refuses the push for good (a hook, a
+protected branch, no write access), the answer says so, `/healthz` reports `failing` and the commit stays in the clone
+until an operator fixes the cause. If saved commits conflict with the remote when they are rebased, the server pushes
+them to a branch `conflict/memex-mcp-<date>`, logs an error, follows the remote again and reports `conflict` on
+`/healthz` until that branch is deleted; should even that push fail, a write waiting behind them is saved without
+further tries. One lock serialises the writes and the loop's rebasing and pushing; the loop's fetch runs outside it.
+After the commit the server re-indexes the touched notes, so search shows the change at once; should that fail, the
+write still counts and search catches up in the next round.
 
-Guards on every write: a note may hold at most `write.max_note_bytes` (64 KiB) afterwards; new text that contains a
-private key block or an access token with a well-known prefix (`ghp_`, `github_pat_`, `sk-`, `AKIA`, `xoxb-`, `glpat-`
-and similar) is refused, naming the kind but never the value, while passwords written in prose are allowed; `edit` needs
-its passage to occur exactly once and `delete` needs the version `read` returned. A new note's line goes into its
-topic's index in the same commit; [docs/memex-format.md](docs/memex-format.md) describes indexes, sections and line
-formats.
+Guards on every write: a note may hold at most `write.max_note_bytes` (64 KiB) afterwards; new text and the path that
+contain a private key block or an access token with a well-known prefix (`ghp_`, `github_pat_`, `sk-`, `AKIA`, `xoxb-`,
+`glpat-` and similar) are refused, naming the kind but never the value, while passwords written in prose are allowed;
+`edit` needs its passage to occur exactly once and `delete` needs the version `read` returned. A new note's line goes
+into its topic's index in the same commit, and the first note of a new wiki topic brings the topic's line for the master
+index. Index lines, section names and topic descriptions are one line without control or format characters, `<!--` or an
+`@` at the start of a word (which Claude Code would follow as a file to load).
+[docs/memex-format.md](docs/memex-format.md) describes indexes, sections and line formats.
 
 **Authentication.** The server is an OAuth 2.1 resource server; Authentik is the authorization server. Clients find
 Authentik through the protected resource metadata (RFC 9728) at `/.well-known/oauth-protected-resource` and obtain
@@ -66,28 +76,33 @@ fetch.
 and, as a member of the group `household`, the shared area too. Nothing else; there is no admin override. A user writes
 exactly where they read, and only below `<area>/memory/` or `<area>/wiki/`. Every tool enforces this on the server, and
 paths are checked before and after following symlinks: only `.md` files, inside an allowed area, no `..`, no absolute
-paths, no hidden segments (`.git`, `.obsidian`). A write follows no symlink at all and takes no control character or
-line break in its path. No write creates, changes or deletes `CLAUDE.md` or `AGENTS.md` in any folder, or an index file
-(`MEMORY.md`, `_index.md`, `_master-index.md`) other than by the line `create` adds. A note, folder or area outside the
-caller's rights gets exactly the answer a missing one gets, so the server does not reveal what other people have.
+paths, no hidden segments (`.git`, `.obsidian`). A write follows no symlink at all and takes no control or format
+character, line break or `<!--` in its path. No write names `CLAUDE.md`, `CLAUDE.local.md` or `AGENTS.md`, in any letter
+case, as a file or a folder. Index files (`MEMORY.md`, `_index.md`, `_master-index.md`, matched the same way) change
+only through `create`, which adds a new note's line and creates the index, a section or the master index line when
+needed. A note, folder or area outside the caller's rights gets exactly the answer a missing one gets, so the server
+does not reveal what other people have.
 
 **Tools.**
 
-| Tool                                               | Does                                                                                                                                                                                                                                                                           |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `search(query, area=None, limit=10)`               | returns `semantic`, optional `notice`, and `hits`: one per note with `path`, `area`, `title`, `snippet` (up to 300 characters, `index.snippet_chars`, around the best match), `score`, `archived`, `created`, `updated`                                                        |
-| `read(path)`                                       | returns the full note: `path`, `area`, `title`, `archived`, `content`, `version` (git's blob id of the content), `created`, `updated`                                                                                                                                          |
-| `list(area, folder=None)`                          | returns the notes and folders of one folder: `name`, `path`, `type` (`note` or `folder`)                                                                                                                                                                                       |
-| `areas()`                                          | returns the caller's own areas: `areas` (the own area, plus `household` for members of the household group)                                                                                                                                                                    |
-| `index_sections(path)`                             | returns the index a new note at `path` (a note's path or a folder) would be listed in: `index` (its path, `null` for a daily note), `exists`, `sections`                                                                                                                       |
-| `create(path, content, index_section, index_line)` | creates a note, refusing an existing path, and adds `index_line` (one line, at most 300 characters) at the end of `index_section` in its index; a note under a `daily/` folder takes no index line and ignores both; a wiki note needs a topic folder (`<area>/wiki/<topic>/`) |
-| `append(path, text)`                               | adds `text` at the end of an existing note, on a line of its own                                                                                                                                                                                                               |
-| `edit(path, old_text, new_text, version=None)`     | replaces `old_text`, which must occur exactly once; with `version`, refuses a note that changed since it was read                                                                                                                                                              |
-| `delete(path, version)`                            | deletes a note if it still has `version`; its index line stays until a cleanup                                                                                                                                                                                                 |
+The write tools exist only with `write.enabled` on.
+
+| Tool                                                                  | Does                                                                                                                                                                                                                                                                                                                                                             |
+| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `search(query, area=None, limit=10)`                                  | returns `semantic`, optional `notice`, and `hits`: one per note with `path`, `area`, `title`, `snippet` (up to 300 characters, `index.snippet_chars`, around the best match), `score`, `archived`, `created`, `updated`                                                                                                                                          |
+| `read(path)`                                                          | returns the full note: `path`, `area`, `title`, `archived`, `content`, `version` (git's blob id of the content), `created`, `updated`                                                                                                                                                                                                                            |
+| `list(area, folder=None)`                                             | returns the notes and folders of one folder: `name`, `path`, `type` (`note` or `folder`)                                                                                                                                                                                                                                                                         |
+| `areas()`                                                             | returns the caller's own areas: `areas` (the own area, plus `household` for members of the household group)                                                                                                                                                                                                                                                      |
+| `index_sections(path)`                                                | returns the index a new note at `path` (a note's path or a folder) would be listed in, its topic's: `index` (its path, `null` for a daily note), `exists`, `sections`                                                                                                                                                                                            |
+| `create(path, content, index_section, index_line, topic_description)` | creates a note, refusing an existing path, and adds `index_line` (a description of at most 300 characters) at the end of `index_section` in its topic's index; the first note of a new wiki topic also needs `topic_description` for the master index; a note under a `daily/` folder takes no index line and ignores the rest; a wiki note needs a topic folder |
+| `append(path, text)`                                                  | adds `text` at the end of an existing note, on a line of its own                                                                                                                                                                                                                                                                                                 |
+| `edit(path, old_text, new_text, version=None)`                        | replaces `old_text`, which must occur exactly once; with `version`, refuses a note that changed since it was read                                                                                                                                                                                                                                                |
+| `delete(path, version)`                                               | deletes a note if it still has `version`; its index line stays until a cleanup                                                                                                                                                                                                                                                                                   |
 
 The write tools return `path`, `commit`, `pushed`, `searchable`, the note's new `version` (not after `delete`), for
 `create` the `index` it added a line to, and a `notice` when the commit is not pushed yet or search does not show it
-yet. `created` and `updated` are ISO 8601 timestamps, or `null` while the index has no dates for the note.
+yet, or the git host refused it. `created` and `updated` are ISO 8601 timestamps, or `null` while the index has no dates
+for the note.
 
 ## Trust model
 
@@ -98,9 +113,9 @@ yet. `created` and `updated` are ISO 8601 timestamps, or `null` while the index 
   operator would need client-side encryption, which rules out server-side search.
 - Response times are not separated: while the server indexes someone's new notes, searches wait for it, and writes wait
   for each other, so a caller can notice that other areas are being written, though not what they contain.
-- The server pushes with a credential that can write the whole repository; the per-area write rights hold only for
-  writes through the server. A commit's author is what the server sets from the verified token, but git itself does not
-  verify authors: anyone else who can push can name any author.
+- With writing on, the server pushes with a credential that can write the whole repository; the per-area write rights
+  hold only for writes through the server. A commit's author is what the server sets from the verified token, but git
+  itself does not verify authors: anyone else who can push can name any author.
 - The checks for secrets catch only unambiguous machine secrets in the text a write adds. Whatever a note holds is
   readable by everyone with the repository, as above.
 - Operators who need people separated at the git level would use one repository per person plus one shared repository.
@@ -136,6 +151,7 @@ that names no setting, other than `MEMEX_CONFIG`, also stops the start.
 | `embeddings.dimensions`                                    | `1024`                                     | vector size of the model; changing model or size drops the stored vectors |
 | `embeddings.query_timeout_seconds`                         | `3`                                        | a search's embedding call must finish within this, else keywords only     |
 | `embeddings.retry_after_seconds`                           | `60`                                       | how long searches skip the embedder after a failure                       |
+| `write.enabled`                                            | `false`                                    | offer the write tools; needs a remote the server may push to              |
 | `write.max_note_bytes`                                     | `65536`                                    | the largest a note may be after a write through the server, in bytes      |
 | `write.author_email`                                       | `{username}@memex.invalid`                 | commit author's e-mail; `{username}` becomes the caller's username        |
 | `users.<username>`                                         | none                                       | Authentik username to the user's own area directory                       |
@@ -226,15 +242,15 @@ the container unhealthy only when the server stops answering. The body says more
 {"status":"ok","embeddings":"ok","repo":"ok"}
 ```
 
-| Field        | Value      | Meaning                                                                                                                              |
-| ------------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `status`     | `ok`       | the server answers                                                                                                                   |
-| `embeddings` | `ok`       | the latest embedding call or check succeeded, or none has run yet                                                                    |
-|              | `failing`  | the latest embedding call (a search's query or the vectors of new notes) or check failed                                             |
-|              | `disabled` | `embeddings.enabled` is off                                                                                                          |
-| `repo`       | `ok`       | the last refresh round fetched and fast-forwarded the clone without an error, or only the first round, which does not fetch, has run |
-|              | `failing`  | the last round could not fetch, bring the clone onto the remote or push, or broke off with an error; the last state is served        |
-|              | `conflict` | a branch `conflict/memex-mcp-<date>` with commits that conflicted is on the remote; it stays until the branch is deleted             |
+| Field        | Value      | Meaning                                                                                                                                                              |
+| ------------ | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`     | `ok`       | the server answers                                                                                                                                                   |
+| `embeddings` | `ok`       | the latest embedding call or check succeeded, or none has run yet                                                                                                    |
+|              | `failing`  | the latest embedding call (a search's query or the vectors of new notes) or check failed                                                                             |
+|              | `disabled` | `embeddings.enabled` is off                                                                                                                                          |
+| `repo`       | `ok`       | the last refresh round fetched, brought the clone onto the remote and pushed what it had to without an error, or only the first round, which does not fetch, has run |
+|              | `failing`  | the last round could not fetch, bring the clone onto the remote or push, or broke off with an error, or a write's push was refused since; the last state is served   |
+|              | `conflict` | a branch `conflict/memex-mcp-<date>` with commits that conflicted is on the remote, as last fetched; shown instead of `failing`, until the branch is deleted         |
 
 Every refresh round (`repo.fetch_interval_seconds`) checks the embedder. Usually the check asks Ollama for its model
 list (`GET /api/tags`) and looks for `embeddings.model` there, which loads no model. It compares names as Ollama
