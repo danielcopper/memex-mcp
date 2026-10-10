@@ -95,7 +95,7 @@ that names no setting, other than `MEMEX_CONFIG`, also stops the start.
 | `index.snippet_chars`, `index.chunk_chars`                 | `300`, `1500`                              | snippet and chunk size                                                    |
 | `embeddings.enabled`, `embeddings.url`, `embeddings.model` | `true`, `http://localhost:11434`, `bge-m3` | the Ollama embedder                                                       |
 | `embeddings.dimensions`                                    | `1024`                                     | vector size of the model; changing model or size drops the stored vectors |
-| `embeddings.query_timeout_seconds`                         | `3`                                        | how long a search waits before falling back to keywords                   |
+| `embeddings.query_timeout_seconds`                         | `3`                                        | a search's embedding call must finish within this, else keywords only     |
 | `embeddings.retry_after_seconds`                           | `60`                                       | how long searches skip the embedder after a failure                       |
 | `users.<username>`                                         | none                                       | Authentik username to the user's own area directory                       |
 

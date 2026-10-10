@@ -117,8 +117,11 @@ class EmbeddingsConfig:
     url: str = "http://localhost:11434"
     model: str = "bge-m3"
     dimensions: int = 1024
-    # A search waits this long for the query embedding before it falls back
-    # to keyword search only.
+    # A call to the embedder must finish within its timeout, checked once the
+    # headers have arrived and after each part of the answer: a server that goes
+    # silent can stretch a call by up to one more timeout, one that trickles its
+    # headers or the framing of its answer byte by byte for longer still. A
+    # search whose query embedding misses it falls back to keyword search only.
     query_timeout_seconds: float = 3.0
     index_timeout_seconds: float = 120.0
     # After a failure, searches skip the embedder for this long.
