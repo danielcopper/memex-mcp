@@ -132,7 +132,7 @@ def raw_config(tmp_path: Path, origin: Origin | None = None) -> dict[str, dict[s
         },
         "index": {"path": str(tmp_path / "index" / "memex.sqlite3")},
         "embeddings": {"dimensions": FakeEmbedder.dimensions},
-        "write": {},
+        "write": {"enabled": True},
         "users": {
             "alice": "alice",
             "bob": "bob",

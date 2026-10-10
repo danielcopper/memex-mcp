@@ -26,7 +26,7 @@ from starlette.routing import Route
 from memex_mcp.auth import AuthentikTokenVerifier, identity_from
 from memex_mcp.config import Config
 from memex_mcp.rights import AccessDenied, Identity, InvalidRequest, NotFound
-from memex_mcp.service import MAX_QUERY_CHARS, MAX_QUERY_WORDS, Memex
+from memex_mcp.service import MAX_QUERY_CHARS, MAX_QUERY_WORDS, IndexLine, Memex
 
 log = logging.getLogger(__name__)
 
@@ -39,12 +39,15 @@ area and, if you belong to the household, the shared area `household`. Use `sear
 to find notes (it returns short snippets), `read` to get one note in full, `list`
 to browse a folder, and `areas` to see which areas you can use. Notes under an
 `archive/` folder are historical: prefer current notes and treat archived ones as
-background.
+background."""
+
+WRITE_INSTRUCTIONS = """
 
 You can write where you can read, below `<area>/memory/` and `<area>/wiki/`:
 `create` a note (call `index_sections` first to pick the section of its index),
 `append` to one, `edit` a passage of one, or `delete` one. Every write is saved as
-its own commit. Never write secrets such as keys or tokens into a note."""
+its own commit. Never write keys or access tokens into a note; a password the user
+asks you to note down is fine."""
 
 AREA_FILTER_HELP = "Search only this area, e.g. 'household'. Omit to search all your areas."
 PATH_HELP = "The note's path as search or list return it, e.g. 'household/memory/wifi.md'."
@@ -138,7 +141,7 @@ def build_mcp(
 
     mcp = FastMCP(
         "memex",
-        instructions=INSTRUCTIONS,
+        instructions=INSTRUCTIONS + (WRITE_INSTRUCTIONS if config.write.enabled else ""),
         auth=auth,
         lifespan=lifespan,
         mask_error_details=True,
@@ -183,7 +186,8 @@ def build_mcp(
             Field(description=PATH_HELP),
         ],
     ) -> Mapping[str, object]:
-        """Read one memory note in full (Markdown), with its title and whether it is archived."""
+        """Read one memory note in full (Markdown), with its title, whether it is archived,
+        its `version` (which edit and delete take) and when it was created and last updated."""
         identity = _caller()
         return await _run(partial(memex.read, identity, path))
 
@@ -203,12 +207,13 @@ def build_mcp(
 
     @mcp.tool(name="areas", annotations=READ_ONLY)
     async def areas() -> Mapping[str, object]:
-        """List the memory areas you can search, read and list: your own and, if you
-        belong to the household, the shared one."""
+        """List the memory areas you can use: your own and, if you belong to the
+        household, the shared one."""
         identity = _caller()
         return await _run(partial(memex.areas, identity))
 
-    _add_write_tools(mcp, config, memex)
+    if config.write.enabled:
+        _add_write_tools(mcp, config, memex)
 
     @mcp.custom_route(HEALTH_PATH, methods=["GET"], include_in_schema=False)
     async def health(_request: Request) -> Response:
@@ -237,17 +242,32 @@ def _add_write_tools(mcp: FastMCP, config: Config, memex: Memex) -> None:
         ] = None,
         index_line: Annotated[
             str | None,
-            Field(description="One line, at most 300 characters, saying what the note holds."),
+            Field(
+                description=(
+                    "What the note holds, for its index: one line of at most 300 characters."
+                )
+            ),
+        ] = None,
+        topic_description: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Only for the first note of a new wiki topic: what the topic holds, "
+                    "for the master index; one line of at most 300 characters."
+                )
+            ),
         ] = None,
     ) -> Mapping[str, object]:
-        """Create a new note and add its line to its index, in one commit.
+        """Create a new note and add its line to its topic's index, in one commit.
 
         Refuses a path where a note exists. Notes in a `daily/` folder take no
-        index line; every other note needs index_section and index_line. Returns
-        the commit, whether it was pushed, and the note's version.
+        index line; every other note needs index_section and index_line, and the
+        first note of a new wiki topic also topic_description. Returns the commit,
+        whether it was pushed, and the note's version.
         """
         identity = _caller()
-        return await _run(partial(memex.create, identity, path, content, index_section, index_line))
+        listing = IndexLine(index_section, index_line, topic_description)
+        return await _run(partial(memex.create, identity, path, content, listing))
 
     @mcp.tool(name="append", annotations=ADDS)
     async def append(
@@ -271,7 +291,7 @@ def _add_write_tools(mcp: FastMCP, config: Config, memex: Memex) -> None:
         new_text: Annotated[str, Field(description="What replaces it.", max_length=longest)],
         version: Annotated[
             str | None,
-            Field(description=VERSION_HELP + " Given, the edit is refused if the note changed."),
+            Field(description=VERSION_HELP + " If given, the edit is refused if the note changed."),
         ] = None,
     ) -> Mapping[str, object]:
         """Replace one passage of a note: old_text must occur in it exactly once."""

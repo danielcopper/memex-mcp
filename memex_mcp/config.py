@@ -131,10 +131,13 @@ class EmbeddingsConfig:
 
 @dataclass(frozen=True)
 class WriteConfig:
+    # Off, the server offers no write tools and only fast-forwards its clone.
+    enabled: bool = False
     # A note may hold at most this many bytes after a write through the server.
     max_note_bytes: int = 65536
     # The e-mail address of a write's commit author; "{username}" becomes the
-    # caller's username, reduced to letters, digits and . _ + -.
+    # caller's username, with every character other than letters, digits and
+    # . _ + - replaced by "-".
     author_email: str = "{username}@memex.invalid"
 
 

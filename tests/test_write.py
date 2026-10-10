@@ -9,6 +9,7 @@ from typing import cast
 
 import pytest
 
+from memex_mcp.config import build_config, load_config
 from memex_mcp.notes import CHANGED_SINCE_READ, version_of
 from memex_mcp.rights import (
     ACCESS_DENIED,
@@ -22,7 +23,7 @@ from memex_mcp.rights import (
     InvalidRequest,
     NotFound,
 )
-from memex_mcp.service import EXISTS, NOT_SEARCHABLE, Memex, WriteResult
+from memex_mcp.service import EXISTS, NOT_SEARCHABLE, IndexLine, Memex, WriteResult
 from tests.conftest import (
     ALICE,
     BOB,
@@ -33,7 +34,9 @@ from tests.conftest import (
     Origin,
     git,
     make_config,
+    raw_config,
 )
+from tests.test_config import EXAMPLE
 from tests.test_paths import ATTACKS
 
 # Topics in alice's area, with indexes in both formats.
@@ -102,7 +105,7 @@ def clone_file(memex: Memex, path: str) -> str:
 def create(
     memex: Memex, identity: Identity, path: str, content: str = "# New\n\nText.\n"
 ) -> WriteResult:
-    return memex.create(identity, path, content, "Notes", LINE)
+    return memex.create(identity, path, content, IndexLine("Notes", LINE))
 
 
 # -- rights ------------------------------------------------------------
@@ -140,7 +143,7 @@ def test_create_matrix(memex: Memex, remote: Remote, case: tuple[Identity, str])
 
 
 WRITE_CALLS: dict[str, Callable[[Memex, Identity, str], object]] = {
-    "create": lambda m, i, p: m.create(i, p, "# x\n", "Notes", LINE),
+    "create": lambda m, i, p: m.create(i, p, "# x\n", IndexLine("Notes", LINE)),
     "append": lambda m, i, p: m.append(i, p, "more"),
     "edit": lambda m, i, p: m.edit(i, p, "zebracode", "changed"),
     "delete": lambda m, i, p: m.delete(i, p, "0" * 40),
@@ -420,9 +423,9 @@ TOKEN = "gh" + "p_" + "Zz9" * 12
 
 
 SECRET_CALLS: list[Callable[[Memex], object]] = [
-    lambda m: m.create(ALICE, "alice/memory/t.md", f"token {TOKEN}\n", "Notes", LINE),
-    lambda m: m.create(ALICE, "alice/memory/t.md", "# T\n", "Notes", f"token {TOKEN}"),
-    lambda m: m.create(ALICE, "alice/memory/t.md", "# T\n", TOKEN, LINE),
+    lambda m: m.create(ALICE, "alice/memory/t.md", f"token {TOKEN}\n", IndexLine("Notes", LINE)),
+    lambda m: m.create(ALICE, "alice/memory/t.md", "# T\n", IndexLine("Notes", f"token {TOKEN}")),
+    lambda m: m.create(ALICE, "alice/memory/t.md", "# T\n", IndexLine(TOKEN, LINE)),
     lambda m: m.create(ALICE, "alice/memory/daily/t.md", f"token {TOKEN}\n"),
     lambda m: m.append(ALICE, "alice/memory/zebra.md", f"token {TOKEN}"),
     lambda m: m.edit(ALICE, "alice/memory/zebra.md", "private", TOKEN),
@@ -462,7 +465,9 @@ def test_a_password_in_prose_is_allowed(memex: Memex) -> None:
 def test_create_adds_the_line_at_the_end_of_an_existing_section(
     topics: Memex, remote: Remote
 ) -> None:
-    result = topics.create(ALICE, "alice/memory/homelab/vpn.md", "# VPN\n", "Services", "VPN")
+    result = topics.create(
+        ALICE, "alice/memory/homelab/vpn.md", "# VPN\n", IndexLine("Services", "VPN")
+    )
     assert result.get("index") == "alice/memory/homelab/MEMORY.md"
     index = remote.show("alice/memory/homelab/MEMORY.md")
     assert "- [dns.md](dns.md) — DNS\n- [vpn.md](vpn.md) — VPN\n\n## Hardware" in index
@@ -474,40 +479,43 @@ def test_create_adds_the_line_at_the_end_of_an_existing_section(
 
 
 def test_a_section_equal_ignoring_case_is_the_existing_one(topics: Memex, remote: Remote) -> None:
-    topics.create(ALICE, "alice/memory/homelab/nas.md", "# NAS\n", "hardware", "NAS")
+    topics.create(ALICE, "alice/memory/homelab/nas.md", "# NAS\n", IndexLine("hardware", "NAS"))
     index = remote.show("alice/memory/homelab/MEMORY.md")
     assert index.count("## ") == 2
     assert index.endswith("- [ups.md](ups.md) — UPS\n- [nas.md](nas.md) — NAS\n")
 
 
 def test_a_new_section_is_added_at_the_end(topics: Memex, remote: Remote) -> None:
-    topics.create(ALICE, "alice/memory/homelab/plan.md", "# Plan\n", "Plans", "the plan")
+    topics.create(ALICE, "alice/memory/homelab/plan.md", "# Plan\n", IndexLine("Plans", "the plan"))
     assert remote.show("alice/memory/homelab/MEMORY.md").endswith(
         "- [ups.md](ups.md) — UPS\n\n## Plans\n\n- [plan.md](plan.md) — the plan\n"
     )
 
 
 def test_a_wiki_note_gets_a_wiki_line(topics: Memex, remote: Remote) -> None:
-    topics.create(ALICE, "alice/wiki/networking/vlan.md", "# VLAN\n", "Basics", "tagging")
+    topics.create(
+        ALICE, "alice/wiki/networking/vlan.md", "# VLAN\n", IndexLine("Basics", "tagging")
+    )
     assert remote.show("alice/wiki/networking/_index.md").endswith(
         "## Basics\n- [[dhcp]] — leases\n- [[vlan]] — tagging\n"
     )
 
 
-def test_a_note_below_a_topic_goes_into_the_nearest_index_above(
+def test_a_note_below_a_topic_goes_into_the_topics_index(
     topics: Memex, origin: Origin, remote: Remote
 ) -> None:
-    deep = topics.create(ALICE, "alice/memory/homelab/net/vlan.md", "# V\n", "Services", "vlans")
-    assert deep.get("index") == "alice/memory/homelab/MEMORY.md"
-    assert "- [net/vlan.md](net/vlan.md) — vlans" in remote.show("alice/memory/homelab/MEMORY.md")
+    # An index file in a subfolder is not the topic's index, and is left alone.
     git(origin.work, "pull", "-q", "--ff-only")
     origin.commit("own index", {"alice/memory/homelab/net/MEMORY.md": "# net\n"})
     topics.refresh()
-    nearer = topics.create(ALICE, "alice/memory/homelab/net/wifi.md", "# W\n", "Radio", "wifi")
-    assert nearer.get("index") == "alice/memory/homelab/net/MEMORY.md"
-    assert (
-        remote.show("alice/memory/homelab/net/MEMORY.md")
-        == "# net\n\n## Radio\n\n- [wifi.md](wifi.md) — wifi\n"
+    deep = topics.create(
+        ALICE, "alice/memory/homelab/net/vlan.md", "# V\n", IndexLine("Services", "vlans")
+    )
+    assert deep.get("index") == "alice/memory/homelab/MEMORY.md"
+    assert "- [net/vlan.md](net/vlan.md) — vlans" in remote.show("alice/memory/homelab/MEMORY.md")
+    assert remote.show("alice/memory/homelab/net/MEMORY.md") == "# net\n"
+    assert topics.index_sections(ALICE, "alice/memory/homelab/net")["index"] == (
+        "alice/memory/homelab/MEMORY.md"
     )
 
 
@@ -515,7 +523,9 @@ def test_a_new_memory_topic_gets_its_index_in_the_same_commit(
     topics: Memex, remote: Remote
 ) -> None:
     pushes = remote.pushes()
-    result = topics.create(ALICE, "alice/memory/garden/roses.md", "# Roses\n", "Plants", "roses")
+    result = topics.create(
+        ALICE, "alice/memory/garden/roses.md", "# Roses\n", IndexLine("Plants", "roses")
+    )
     assert remote.show("alice/memory/garden/MEMORY.md") == (
         "# garden\n\n## Plants\n\n- [roses.md](roses.md) — roses\n"
     )
@@ -527,12 +537,15 @@ def test_a_new_memory_topic_gets_its_index_in_the_same_commit(
 def test_a_new_wiki_topic_gets_its_index_and_a_master_index_line(
     topics: Memex, remote: Remote
 ) -> None:
-    topics.create(ALICE, "alice/wiki/cooking/bread.md", "# Bread\n", "Baking", "sourdough")
+    listing = IndexLine("Baking", "sourdough", "bread and cakes")
+    topics.create(ALICE, "alice/wiki/cooking/bread.md", "# Bread\n", listing)
     assert remote.show("alice/wiki/cooking/_index.md") == (
         "# cooking\n\n## Baking\n\n- [[bread]] — sourdough\n"
     )
+    # The master index has no section: the line goes to its end.
     assert remote.show("alice/wiki/_master-index.md") == (
-        "# Wiki\n\n- [[wiki/networking/_index|Networking]]\n- [[wiki/cooking/_index|cooking]]\n"
+        "# Wiki\n\n- [[wiki/networking/_index|Networking]]\n"
+        "- [[wiki/cooking/_index|cooking]] — bread and cakes\n"
     )
     assert remote.log_of("%B").strip() == (
         "memex-mcp: 3 files in alice/wiki\n\n"
@@ -543,16 +556,18 @@ def test_a_new_wiki_topic_gets_its_index_and_a_master_index_line(
 
 
 def test_a_missing_master_index_is_created(memex: Memex, remote: Remote) -> None:
-    memex.create(BOB, "bob/wiki/garden/soil.md", "# Soil\n", "Basics", "soil")
+    memex.create(BOB, "bob/wiki/garden/soil.md", "# Soil\n", IndexLine("Basics", "soil", "beds"))
     assert remote.show("bob/wiki/_master-index.md") == (
-        "# Wiki master index\n- [[wiki/garden/_index|garden]]\n"
+        "# Wiki master index\n\n## Topics\n\n- [[wiki/garden/_index|garden]] — beds\n"
     )
 
 
 def test_the_first_note_of_an_area_memory_folder_creates_its_index(
     memex: Memex, remote: Remote
 ) -> None:
-    result = memex.create(GUEST, "household/memory/bins.md", "# Bins\n", "House", "bin days")
+    result = memex.create(
+        GUEST, "household/memory/bins.md", "# Bins\n", IndexLine("House", "bin days")
+    )
     assert result.get("index") == "household/memory/MEMORY.md"
     assert remote.show("household/memory/MEMORY.md") == (
         "# household memory\n\n## House\n\n- [bins.md](bins.md) — bin days\n"
@@ -564,7 +579,9 @@ def test_a_daily_note_takes_no_index_line(memex: Memex, remote: Remote) -> None:
     result = memex.create(ALICE, "alice/memory/daily/2026-10-10.md", "## 09:00 — start\n")
     assert result.get("index") is None
     # Given anyway, the index arguments change nothing.
-    memex.create(ALICE, "alice/memory/daily/2026-10-11.md", "## 10:00\n", "Days", "a day")
+    memex.create(
+        ALICE, "alice/memory/daily/2026-10-11.md", "## 10:00\n", IndexLine("Days", "a day")
+    )
     assert clone_file(memex, "alice/memory/MEMORY.md") == index
     assert remote.log_of("%s") == "memex-mcp: create alice/memory/daily/2026-10-11.md"
 
@@ -575,10 +592,10 @@ def test_a_note_without_index_arguments_is_refused_naming_the_sections(
     head = remote.head()
     for section, line in ((None, LINE), ("Services", None), ("", "")):
         with pytest.raises(InvalidRequest) as caught:
-            topics.create(ALICE, "alice/memory/homelab/x.md", "# X\n", section, line)
+            topics.create(ALICE, "alice/memory/homelab/x.md", "# X\n", IndexLine(section, line))
         assert "Services; Hardware" in str(caught.value)
     with pytest.raises(InvalidRequest, match="at most 300 characters"):
-        topics.create(ALICE, "alice/memory/homelab/x.md", "# X\n", "Services", "x" * 301)
+        topics.create(ALICE, "alice/memory/homelab/x.md", "# X\n", IndexLine("Services", "x" * 301))
     assert remote.head() == head
     assert not (topics.root / "alice/memory/homelab/x.md").exists()
 
@@ -686,7 +703,7 @@ def test_a_failed_commit_leaves_the_clone_as_it_was(
     with monkeypatch.context() as patch:
         patch.setattr(GitRepo, "commit", broken)
         with pytest.raises(GitError):
-            memex.create(ALICE, "alice/memory/homelab/new.md", "# New\n", "Notes", LINE)
+            memex.create(ALICE, "alice/memory/homelab/new.md", "# New\n", IndexLine("Notes", LINE))
     assert git(memex.root, "status", "--porcelain", "--untracked-files=all") == ""
     assert git(memex.root, "rev-parse", "HEAD").strip() == head
 
@@ -728,7 +745,7 @@ def test_an_index_that_is_a_symlink_is_never_written(topics: Memex) -> None:
     index.unlink()
     index.symlink_to("../../../bob/memory/garden.md")
     with pytest.raises(NotFound):
-        topics.create(ALICE, "alice/memory/homelab/new.md", "# New\n", "Notes", LINE)
+        topics.create(ALICE, "alice/memory/homelab/new.md", "# New\n", IndexLine("Notes", LINE))
     assert (
         clone_file(topics, "bob/memory/garden.md")
         == "# Garden\n\nThe tomatoes need water every evening.\n"
@@ -737,7 +754,9 @@ def test_an_index_that_is_a_symlink_is_never_written(topics: Memex) -> None:
 
 def test_a_master_index_line_is_not_added_twice(topics: Memex, remote: Remote) -> None:
     # The topic's own index went missing, its master index line did not.
-    topics.create(ALICE, "alice/wiki/networking/vlan.md", "# VLAN\n", "Basics", "tagging")
+    topics.create(
+        ALICE, "alice/wiki/networking/vlan.md", "# VLAN\n", IndexLine("Basics", "tagging")
+    )
     (topics.root / "alice/wiki/networking/_index.md").unlink()
     git(topics.root, "commit", "-q", "-am", "index gone")
     master = remote.show("alice/wiki/_master-index.md").replace(
@@ -745,7 +764,8 @@ def test_a_master_index_line_is_not_added_twice(topics: Memex, remote: Remote) -
     )
     (topics.root / "alice/wiki/_master-index.md").write_text(master, encoding="utf-8")
     git(topics.root, "commit", "-q", "-am", "master names cooking")
-    topics.create(ALICE, "alice/wiki/cooking/bread.md", "# Bread\n", "Baking", "sourdough")
+    listing = IndexLine("Baking", "sourdough", "bread")
+    topics.create(ALICE, "alice/wiki/cooking/bread.md", "# Bread\n", listing)
     assert remote.show("alice/wiki/_master-index.md").count("wiki/cooking/_index") == 1
 
 
@@ -774,7 +794,7 @@ def test_a_wiki_note_needs_a_topic_folder(topics: Memex, remote: Remote) -> None
     head = remote.head()
     guidance = "wiki notes go into a topic folder: alice/wiki/<topic>/glossary.md"
     with pytest.raises(InvalidRequest, match=re.escape(guidance)):
-        topics.create(ALICE, "alice/wiki/glossary.md", "# Glossary\n", "Notes", LINE)
+        topics.create(ALICE, "alice/wiki/glossary.md", "# Glossary\n", IndexLine("Notes", LINE))
     with pytest.raises(InvalidRequest, match="wiki notes go into a topic folder"):
         topics.index_sections(ALICE, "alice/wiki")
     assert remote.head() == head
@@ -792,3 +812,113 @@ def test_notes_already_at_the_wiki_root_can_still_be_changed(
     assert remote.show("alice/wiki/log.md") == "# Log\n\n- began\n- went on\n"
     memex.delete(ALICE, "alice/wiki/log.md", memex.read(ALICE, "alice/wiki/log.md")["version"])
     assert remote.log_of("%s") == "memex-mcp: delete alice/wiki/log.md"
+
+
+@pytest.mark.parametrize("tool", list(WRITE_CALLS))
+@pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        ("alice/memory/claude.md", PROTECTED_FILE),
+        ("alice/memory/CLAUDE.local.md", PROTECTED_FILE),
+        ("alice/memory/homelab/claude.LOCAL.md", PROTECTED_FILE),
+        ("alice/wiki/networking/Agents.md", PROTECTED_FILE),
+        ("alice/memory/CLAUDE.md/inner.md", PROTECTED_FILE),
+        ("alice/wiki/AGENTS.md/networking/x.md", PROTECTED_FILE),
+        ("alice/memory/homelab/memory.md", INDEX_FILE),
+        ("alice/wiki/networking/_INDEX.md", INDEX_FILE),
+        ("alice/wiki/_Master-Index.md", INDEX_FILE),
+        ("household/memory/MEMORY.md/x.md", INDEX_FILE),
+        ("alice/wiki/_index.md/notes/x.md", INDEX_FILE),
+    ],
+)
+def test_protected_and_index_names_are_refused_in_any_case_and_as_folders(
+    memex: Memex, remote: Remote, tool: str, path: str, message: str
+) -> None:
+    head = remote.head()
+    with pytest.raises(AccessDenied, match=re.escape(message)):
+        WRITE_CALLS[tool](memex, ALICE, path)
+    assert remote.head() == head
+    assert not (memex.root / path).exists()
+
+
+def test_a_secret_in_the_path_is_refused(memex: Memex, remote: Remote) -> None:
+    head = remote.head()
+    kind, message = refusal(lambda: create(memex, ALICE, f"alice/memory/daily/{TOKEN}.md"))
+    assert (kind, "a GitHub token" in message, "Zz9" in message) == (InvalidRequest, True, False)
+    assert remote.head() == head
+
+
+@pytest.mark.parametrize("bad", ["\u202e", "\u200b", "<!--"], ids=repr)
+def test_format_characters_and_html_comments_are_refused_everywhere(
+    topics: Memex, remote: Remote, bad: str
+) -> None:
+    head = remote.head()
+    with pytest.raises(AccessDenied, match=re.escape(FORBIDDEN_CHARACTER)):
+        create(topics, ALICE, f"alice/memory/daily/a{bad}b.md")
+    for listing in (
+        IndexLine(f"Se{bad}ction", LINE),
+        IndexLine("Services", f"li{bad}ne"),
+    ):
+        with pytest.raises(InvalidRequest):
+            topics.create(ALICE, "alice/memory/homelab/x.md", "# X\n", listing)
+    with pytest.raises(InvalidRequest, match="topic_description"):
+        topics.create(ALICE, "alice/wiki/new/x.md", "# X\n", IndexLine("S", LINE, f"t{bad}t"))
+    assert remote.head() == head
+
+
+@pytest.mark.parametrize("char", ["\x0c", "\x85", "\u2028"], ids=repr)
+def test_a_line_breaking_character_never_reaches_an_index(
+    topics: Memex, remote: Remote, char: str
+) -> None:
+    for listing in (IndexLine("Services", f"one{char}## Two"), IndexLine(f"A{char}B", LINE)):
+        with pytest.raises(InvalidRequest, match="must be one line"):
+            topics.create(ALICE, "alice/memory/homelab/x.md", "# X\n", listing)
+    assert remote.show("alice/memory/homelab/MEMORY.md") == TOPICS["alice/memory/homelab/MEMORY.md"]
+
+
+def test_an_at_sign_starting_a_word_never_reaches_an_index(topics: Memex, remote: Remote) -> None:
+    head = remote.head()
+    for listing in (
+        IndexLine("Services", "see @~/.ssh/id_ed25519"),
+        IndexLine("@imports", LINE),
+        IndexLine("Basics", LINE, "pulls in @secrets.md"),
+    ):
+        with pytest.raises(InvalidRequest, match="'@' at the start of a word"):
+            topics.create(ALICE, "alice/wiki/new/x.md", "# X\n", listing)
+    assert remote.head() == head
+
+
+def test_a_new_wiki_topic_needs_its_description(topics: Memex, remote: Remote) -> None:
+    head = remote.head()
+    with pytest.raises(InvalidRequest, match="needs topic_description"):
+        topics.create(ALICE, "alice/wiki/cooking/bread.md", "# Bread\n", IndexLine("Baking", LINE))
+    assert remote.head() == head
+    # An existing topic, or a memory topic, needs none.
+    topics.create(ALICE, "alice/wiki/networking/vlan.md", "# V\n", IndexLine("Basics", LINE))
+    topics.create(ALICE, "alice/memory/garden/roses.md", "# R\n", IndexLine("Plants", LINE))
+
+
+def test_the_master_line_goes_to_the_end_of_its_first_section(
+    memex: Memex, origin: Origin, remote: Remote
+) -> None:
+    origin.commit(
+        "master",
+        {
+            "alice/wiki/_master-index.md": (
+                "# Wiki\n\n## Areas\n\n- [[wiki/a/_index|a]] — a\n\n## Log\n"
+            )
+        },
+    )
+    memex.refresh()
+    memex.create(ALICE, "alice/wiki/b/n.md", "# N\n", IndexLine("Notes", LINE, "the b topic"))
+    assert remote.show("alice/wiki/_master-index.md") == (
+        "# Wiki\n\n## Areas\n\n- [[wiki/a/_index|a]] — a\n"
+        "- [[wiki/b/_index|b]] — the b topic\n\n## Log\n"
+    )
+
+
+def test_writing_is_off_unless_switched_on(tmp_path: Path) -> None:
+    raw = raw_config(tmp_path)
+    raw["write"] = {}
+    assert build_config(raw, {}).write.enabled is False
+    assert load_config(EXAMPLE, env={}).write.enabled is False

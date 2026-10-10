@@ -50,10 +50,16 @@ def anyio_backend() -> str:
 
 @asynccontextmanager
 async def serving(
-    tmp_path: Path, origin: Origin, run_loop: bool = False, embedder: Embedder | None = None
+    tmp_path: Path,
+    origin: Origin,
+    run_loop: bool = False,
+    embedder: Embedder | None = None,
+    write: bool = True,
 ) -> AsyncGenerator[tuple[httpx2.AsyncClient, Memex], None]:
     """The app with its lifespan, entered and left in the test's own task, and its service."""
-    config = make_config(tmp_path, origin, repo={"fetch_interval_seconds": 1})
+    config = make_config(
+        tmp_path, origin, repo={"fetch_interval_seconds": 1}, write={"enabled": write}
+    )
     memex = Memex.from_config(config, embedder=embedder)
     with FakeJwks((KEY, "k1")) as jwks:
         verifier = make_verifier(jwks, algorithms=("RS256",))
@@ -381,3 +387,46 @@ async def test_a_text_longer_than_a_note_may_be_is_refused_before_the_service(
         result = await call(client, token(), "append", path="alice/memory/zebra.md", text=too_long)
         assert result["isError"] is True
         assert "at most 65536 characters" in result["content"][0]["text"]
+
+
+@pytest.mark.anyio
+async def test_with_writing_off_only_the_read_tools_are_offered(
+    tmp_path: Path, origin: Origin
+) -> None:
+    async with serving(tmp_path, origin, write=False) as (client, _memex):
+        response = await rpc(client, "tools/list", bearer=token())
+        listed = cast("list[ListedTool]", response.json()["result"]["tools"])
+        assert {tool["name"] for tool in listed} == {"search", "read", "list", "areas"}
+        initialized = await rpc(
+            client,
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"},
+            },
+            bearer=token(),
+        )
+        instructions = cast("str", initialized.json()["result"]["instructions"])
+        assert "search" in instructions
+        assert "create" not in instructions
+
+
+@pytest.mark.anyio
+async def test_with_writing_on_the_instructions_name_the_write_tools(
+    tmp_path: Path, origin: Origin
+) -> None:
+    async with serve(tmp_path, origin) as client:
+        initialized = await rpc(
+            client,
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"},
+            },
+            bearer=token(),
+        )
+        instructions = cast("str", initialized.json()["result"]["instructions"])
+        assert "`create` a note" in instructions
+        assert "a password the user" in instructions

@@ -16,10 +16,11 @@ The rules (v1, no admin override):
 
 Writing follows the same rules, plus these: a caller writes exactly where
 they read, and only below ``<area>/memory/`` or ``<area>/wiki/``; no write
-creates, changes or deletes ``CLAUDE.md`` or ``AGENTS.md`` in any folder or
-an index file (``MEMORY.md``, ``_index.md``, ``_master-index.md``), which
-change only through the index line ``create`` adds; and no write follows a
-symlink anywhere on its path.
+names ``CLAUDE.md``, ``CLAUDE.local.md`` or ``AGENTS.md`` in any letter case,
+as a file or as a folder; no write names an index file (``MEMORY.md``,
+``_index.md``, ``_master-index.md``) either, since indexes change only
+through ``create``, which adds a new note's line and creates the index when
+needed; and no write follows a symlink anywhere on its path.
 """
 
 from __future__ import annotations
@@ -35,10 +36,13 @@ NOTE_SUFFIX = ".md"
 
 # The folders directly inside an area that writes may go into.
 WRITABLE_FOLDERS = frozenset({"memory", "wiki"})
-# Loaded into every assistant session that opens the folder: never written through the server.
-PROTECTED_NAMES = frozenset({"CLAUDE.md", "AGENTS.md"})
-# Changed only by the index line that create adds.
+# Loaded by assistants (Claude Code and others) that open the folder: never written through
+# the server. Compared ignoring case, against every segment of a path.
+PROTECTED_NAMES = frozenset({"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"})
+# Changed only by create, which adds a new note's line. Compared like PROTECTED_NAMES.
 INDEX_NAMES = frozenset({"MEMORY.md", "_index.md", "_master-index.md"})
+_PROTECTED_FOLDED = frozenset(name.casefold() for name in PROTECTED_NAMES)
+_INDEX_FOLDED = frozenset(name.casefold() for name in INDEX_NAMES)
 # A writable note's path has its area, memory or wiki, and at least the file name.
 _MIN_WRITE_SEGMENTS = 3
 
@@ -82,7 +86,7 @@ class Identity:
 
 @dataclass(frozen=True)
 class Policy:
-    """Maps identities to the areas they may read."""
+    """Maps identities to the areas they may read and write."""
 
     users: dict[str, str]
     access_group: str
@@ -130,9 +134,10 @@ class Policy:
         area = check_area(parts[0], areas, NOTE_NOT_FOUND)
         if len(parts) < _MIN_WRITE_SEGMENTS or parts[1] not in WRITABLE_FOLDERS:
             raise AccessDenied(WRITE_OUTSIDE)
-        if parts[-1] in PROTECTED_NAMES:
+        folded = {part.casefold() for part in parts[2:]}
+        if folded & _PROTECTED_FOLDED:
             raise AccessDenied(PROTECTED_FILE)
-        if parts[-1] in INDEX_NAMES:
+        if folded & _INDEX_FOLDED:
             raise AccessDenied(INDEX_FILE)
         return area
 
@@ -149,14 +154,21 @@ WRITE_OUTSIDE = (
     "notes can only be written below <area>/memory/ or <area>/wiki/, "
     "e.g. 'household/memory/wifi.md'"
 )
-PROTECTED_FILE = "CLAUDE.md and AGENTS.md cannot be written through memex"
+PROTECTED_FILE = (
+    "files and folders named CLAUDE.md, CLAUDE.local.md or AGENTS.md, in any letter case, "
+    "cannot be written through memex"
+)
 INDEX_FILE = (
-    "index files (MEMORY.md, _index.md, _master-index.md) cannot be written directly; "
-    "create adds a new note's line to its index"
+    "files and folders named MEMORY.md, _index.md or _master-index.md, in any letter case, "
+    "cannot be written directly; create adds a new note's line to its index, creating the "
+    "index when needed"
 )
 FORBIDDEN_CHARACTER = "the path contains a forbidden character"
-# Unicode categories no written path may contain: control characters and line breaks.
-_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
+# What no written path may contain: control characters and line breaks, which would split
+# the commit message, and format characters such as bidi overrides and "<!--", which can
+# hide what follows where the path is shown.
+_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+_HTML_COMMENT = "<!--"
 
 
 def split_path(path: str) -> tuple[str, ...]:
@@ -245,12 +257,15 @@ def resolve_folder(root: Path, area: str, folder: str | None, areas: frozenset[s
 
 
 def split_write_path(path: str) -> tuple[str, ...]:
-    """``split_path`` for a note to write: an ``.md`` name, no control character or line break.
+    """``split_path`` for a note to write: an ``.md`` name, no control or format character,
+    no line break and no ``<!--``.
 
-    The path ends up in a commit message, one line per file.
+    The path ends up in a commit message, one line per file, and in an index.
     """
     parts = split_path(path)
-    if any(unicodedata.category(char) in _FORBIDDEN_CATEGORIES for char in path):
+    if _HTML_COMMENT in path or any(
+        unicodedata.category(char) in _FORBIDDEN_CATEGORIES for char in path
+    ):
         raise AccessDenied(FORBIDDEN_CHARACTER)
     if not parts or not parts[-1].endswith(NOTE_SUFFIX):
         raise AccessDenied(f"only notes ({NOTE_SUFFIX} files) can be written")

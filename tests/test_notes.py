@@ -12,6 +12,7 @@ from memex_mcp.notes import (
     check_secrets,
     checked_line,
     checked_section,
+    checked_topic,
     commit_message,
     edited,
     index_entry,
@@ -22,6 +23,7 @@ from memex_mcp.notes import (
     section_names,
     version_of,
     with_entry,
+    with_topic,
 )
 from memex_mcp.rights import InvalidRequest
 
@@ -122,16 +124,14 @@ def test_daily_notes_are_those_in_a_daily_folder(parts: tuple[str, ...], daily: 
     assert is_daily(parts) is daily
 
 
-def test_index_candidates_run_from_the_notes_folder_up_to_its_topic() -> None:
+def test_the_index_is_always_the_topics() -> None:
     spot = index_spot(("alice", "memory", "homelab", "domain", "dns.md"))
-    assert spot.name == "MEMORY.md"
-    assert spot.candidates == (
-        ("alice", "memory", "homelab", "domain"),
-        ("alice", "memory", "homelab"),
-    )
-    assert index_spot(("alice", "memory", "x.md")).candidates == (("alice", "memory"),)
-    wiki = index_spot(("alice", "wiki", "networking", "dhcp.md"))
+    assert (spot.name, spot.topic) == ("MEMORY.md", ("alice", "memory", "homelab"))
+    assert index_spot(("alice", "memory", "x.md")).topic == ("alice", "memory")
+    wiki = index_spot(("alice", "wiki", "networking", "deep", "dhcp.md"))
     assert (wiki.name, wiki.topic) == ("_index.md", ("alice", "wiki", "networking"))
+    with pytest.raises(InvalidRequest, match="wiki notes go into a topic folder"):
+        index_spot(("alice", "wiki", "x.md"))
 
 
 def test_index_lines_follow_the_format_of_their_index() -> None:
@@ -147,8 +147,8 @@ def test_index_lines_follow_the_format_of_their_index() -> None:
     assert index_entry("wiki", wiki, ("alice", "wiki", "networking"), "leases") == (
         "- [[dhcp leases]] — leases"
     )
-    assert master_entry(("alice", "wiki", "networking")) == (
-        "- [[wiki/networking/_index|networking]]"
+    assert master_entry(("alice", "wiki", "networking"), "the home network") == (
+        "- [[wiki/networking/_index|networking]] — the home network"
     )
 
 
@@ -198,8 +198,10 @@ def test_an_entry_in_an_empty_section_follows_a_blank_line() -> None:
 
 
 def test_an_unknown_section_is_added_at_the_end() -> None:
+    assert with_entry(INDEX, "Recipes", "- r").endswith("## Empty\n\n## Recipes\n\n- r\n")
+    # Blank lines at the end stay: no line but the new ones changes.
     result = with_entry(INDEX + "\n\n", "Recipes", "- r")
-    assert result.endswith("## Empty\n\n## Recipes\n\n- r\n")
+    assert result.endswith("## Empty\n\n\n## Recipes\n\n- r\n")
     assert section_names(result)[-1] == "Recipes"
 
 
@@ -266,3 +268,66 @@ def test_commit_message_for_one_file_and_for_several() -> None:
     )
     apart = commit_message("memex-mcp", [("update", "alice/x.md"), ("update", "bob/y.md")])
     assert apart.splitlines()[0] == "memex-mcp: 2 files"
+
+
+# Characters Python's splitlines() breaks at besides "\n" and "\r", and format characters.
+LINE_BREAKERS = ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+FORMAT_CHARACTERS = ["\u202e", "\u200b", "\u2066"]
+
+
+@pytest.mark.parametrize("char", ["\t", *LINE_BREAKERS, *FORMAT_CHARACTERS], ids=repr)
+def test_index_texts_refuse_control_format_and_line_breaking_characters(char: str) -> None:
+    text = f"before{char}after"
+    with pytest.raises(InvalidRequest, match="index_line must be one line"):
+        checked_line(text, [])
+    with pytest.raises(InvalidRequest, match="index_section must be one line"):
+        checked_section(text, [])
+    with pytest.raises(InvalidRequest, match="topic_description must be one line"):
+        checked_topic(text)
+
+
+@pytest.mark.parametrize("text", ["see @notes.md", "@notes.md", "(@x)", "a @@b"])
+def test_index_texts_refuse_an_at_sign_starting_a_word(text: str) -> None:
+    for check in (lambda: checked_line(text, []), lambda: checked_section(text, [])):
+        with pytest.raises(InvalidRequest, match="'@' at the start of a word"):
+            check()
+    with pytest.raises(InvalidRequest, match="'@' at the start of a word"):
+        checked_topic(text)
+
+
+def test_an_at_sign_inside_a_word_is_fine() -> None:
+    assert checked_line("mail alice@example.org", []) == "mail alice@example.org"
+
+
+def test_index_texts_refuse_an_html_comment() -> None:
+    for check in (
+        lambda: checked_line("a <!-- b", []),
+        lambda: checked_section("a <!-- b", []),
+        lambda: checked_topic("a <!-- b"),
+    ):
+        with pytest.raises(InvalidRequest, match="must not contain '<!--'"):
+            check()
+
+
+def test_a_topic_description_is_required_and_one_line() -> None:
+    with pytest.raises(InvalidRequest, match="needs topic_description"):
+        checked_topic(None)
+    with pytest.raises(InvalidRequest, match="at most 300 characters"):
+        checked_topic("x" * 301)
+    assert checked_topic(" the home network ") == "the home network"
+
+
+@pytest.mark.parametrize("char", LINE_BREAKERS, ids=repr)
+def test_an_entry_changes_no_byte_of_the_other_lines(char: str) -> None:
+    index = f"# Index\n\n## Tools\n\n- [a.md](a.md) — one{char}## not a heading\n- tail{char}\n"
+    result = with_entry(index, "Tools", "- [c.md](c.md) — c")
+    assert result == index + "- [c.md](c.md) — c\n"
+    assert section_names(result) == ["Tools"]
+
+
+def test_the_master_line_goes_to_the_end_of_the_first_section() -> None:
+    master = "# Wiki\n\n## Topics\n\n- [[wiki/a/_index|a]] — a\n\n## Other\n\n- x\n"
+    assert with_topic(master, "- new") == (
+        "# Wiki\n\n## Topics\n\n- [[wiki/a/_index|a]] — a\n- new\n\n## Other\n\n- x\n"
+    )
+    assert with_topic("# Wiki\n\n- [[a]]\n", "- new") == "# Wiki\n\n- [[a]]\n- new\n"

@@ -7,6 +7,7 @@ import re
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
@@ -51,8 +52,16 @@ class Push(Enum):
     PUSHED = "pushed"
     # The remote has commits the clone lacks: fetch, and try again on top of them.
     REJECTED = "rejected"
-    # Anything else: unreachable, refused by a hook, timed out.
+    # The remote turned the push down for good: a hook, a protected branch, no write access.
+    REFUSED = "refused"
+    # Anything else: unreachable, timed out.
     FAILED = "failed"
+
+
+# What git prints when the remote refuses a push for lack of rights.
+_NO_WRITE_ACCESS = re.compile(
+    r"\b403\b|permission denied|not allowed to push|write access", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -72,18 +81,30 @@ def _identity_env(author: Author | None) -> dict[str, str]:
     }
 
 
+def _iso(date: str) -> str:
+    """One spelling for every date: git writes UTC as "Z" in some places, "+00:00" in others."""
+    return datetime.fromisoformat(date).isoformat() if date else date
+
+
 def _parse_dates(out: str) -> dict[str, tuple[str, str]]:
-    """``git log -z --name-only --format=%x01%aI``, newest first, as path -> (created, updated)."""
+    """``git log -z --name-only --format=%x01%aI %cI``, newest first, as path ->
+    (created, updated).
+
+    created is the author date of the first commit touching the path, when
+    it was written; updated the commit date of the last one, when the last
+    change landed: a commit rebased onto newer ones keeps its author date.
+    """
     dates: dict[str, tuple[str, str]] = {}
-    date = ""
+    authored = committed = ""
     for field in out.split("\x00"):
         name = field.lstrip("\n")
         if name.startswith("\x01"):
-            date = name[1:]
+            authored_at, _, committed_at = name[1:].partition(" ")
+            authored, committed = _iso(authored_at), _iso(committed_at)
         elif name:
-            # Newest first: the first date seen is the last change, the last one the first.
-            updated = dates[name][1] if name in dates else date
-            dates[name] = (date, updated)
+            # Newest first: the first commit seen is the last change, the last one the first.
+            updated = dates[name][1] if name in dates else committed
+            dates[name] = (authored, updated)
     return dates
 
 
@@ -182,14 +203,32 @@ class GitRepo:
             return Push.FAILED
         if done.returncode == 0:
             return Push.PUSHED
-        # A ref the remote turned down for lack of commits reads "!<tab>…<tab>[rejected] …".
-        rejected = any(
-            line.startswith("!") and "\t[rejected]" in line for line in done.stdout.splitlines()
-        )
-        return Push.REJECTED if rejected else Push.FAILED
+        # A ref the remote turned down reads "!<tab>…<tab>[rejected] …" for lack of commits,
+        # "!<tab>…<tab>[remote rejected] …" when a hook or a protection refused it.
+        refs = [line for line in done.stdout.splitlines() if line.startswith("!")]
+        if any("\t[rejected]" in line for line in refs):
+            return Push.REJECTED
+        if any("\t[remote rejected]" in line for line in refs) or _NO_WRITE_ACCESS.search(
+            done.stderr
+        ):
+            return Push.REFUSED
+        return Push.FAILED
 
     def reset_hard(self, ref: str) -> None:
         self._git("reset", "--quiet", "--hard", ref)
+
+    def restore(self) -> None:
+        """Bring the working tree back to HEAD: end a rebase left behind, drop changes that
+        were never committed, remove untracked files (a crash's leftovers)."""
+        self.abort_rebase()
+        self._git("reset", "--quiet", "--hard", "HEAD")
+        self._git("clean", "--quiet", "--force", "-d")
+
+    def abort_rebase(self) -> None:
+        """End a rebase a timeout or a crash left behind, so that the next one can start."""
+        git_dir = self.path / ".git"
+        if (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists():
+            self._git("rebase", "--abort")
 
     def rebase(self) -> bool:
         """Replay the clone's own commits on the fetched remote; on a conflict, undo and say so."""
@@ -210,10 +249,12 @@ class GitRepo:
         return [name for name in out.splitlines() if name]
 
     def dates(self, paths: Sequence[str] | None = None) -> dict[str, tuple[str, str]]:
-        """Path -> (created, updated): the author dates of the first and the last commit
-        touching it, in ISO 8601. ``None`` reads every path in one pass over the history.
+        """Path -> (created, updated) in ISO 8601: the author date of the first commit
+        touching it and the commit date of the last one. ``None`` reads every path in one
+        pass over the history.
         """
-        command = ("log", "-z", "--name-only", "--no-renames", "--format=%x01%aI", "HEAD")
+        command = ("log", "-z", "--topo-order", "--name-only", "--no-renames")
+        command += ("--format=%x01%aI %cI", "HEAD")
         if paths is None or len(paths) > _MAX_DATE_PATHS:
             dates = _parse_dates(self._git(*command))
             return dates if paths is None else {p: dates[p] for p in paths if p in dates}

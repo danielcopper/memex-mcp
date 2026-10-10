@@ -13,7 +13,7 @@ import pytest
 
 from memex_mcp.repo import CONFLICT_PREFIX, GitRepo, Push
 from memex_mcp.rights import Identity, InvalidRequest
-from memex_mcp.service import NOT_PUSHED, PUSH_RETRIES, Memex
+from memex_mcp.service import NOT_PUSHED, PUSH_REFUSED, PUSH_RETRIES, WRITING_DISABLED, Memex
 from tests.conftest import ALICE, BOB, Origin, git, make_config
 from tests.test_write import Remote
 
@@ -402,5 +402,135 @@ def test_a_push_that_times_out_keeps_the_commit(
         mend_remote(memex, origin)
         assert memex.refresh() is True
         assert remote.head() == result["commit"]
+    finally:
+        memex.index.close()
+
+
+# -- review fixes ------------------------------------------------------------
+
+
+def test_a_write_stuck_behind_unparkable_conflicts_is_saved_without_retrying(
+    memex: Memex, origin: Origin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pushes: list[str] = []
+    real_push = GitRepo.push
+
+    def counted(self: GitRepo, ref: str = "HEAD", branch: str | None = None) -> Push:
+        pushes.append(branch or "main")
+        return real_push(self, ref, branch)
+
+    def cannot_park(_self: Memex) -> bool:
+        return False
+
+    make_conflict(memex, origin)
+    monkeypatch.setattr(GitRepo, "push", counted)
+    monkeypatch.setattr(Memex, "_park_conflict", cannot_park)
+    result = memex.append(ALICE, "household/memory/wifi.md", "- now")
+    # One push, turned down; no retries on a clone that cannot get onto the remote.
+    assert pushes == ["main"]
+    assert (result["pushed"], result.get("notice")) == (False, NOT_PUSHED)
+    assert git(memex.root, "rev-parse", "HEAD").strip() == result["commit"]
+    assert (memex.root / "household/memory/wifi.md").read_text(encoding="utf-8").endswith("- now\n")
+    assert git(memex.root, "status", "--porcelain") == ""
+
+
+def test_start_drops_what_a_crash_left_between_writing_and_committing(
+    memex: Memex, remote: Remote
+) -> None:
+    (memex.root / "alice/memory/zebra.md").write_text("# half written\n", encoding="utf-8")
+    (memex.root / "alice/memory/.memex-abc123").write_bytes(b"temporary")
+    (memex.root / "alice/memory/daily").mkdir()
+    (memex.root / "alice/memory/daily/uncommitted.md").write_text("# U\n", encoding="utf-8")
+    memex.index.close()
+    again = Memex.from_config(memex.config, None)
+    again.prepare()
+    try:
+        assert git(again.root, "status", "--porcelain", "--ignored") == ""
+        assert "zebracode" in again.read(ALICE, "alice/memory/zebra.md")["content"]
+        assert again.append(ALICE, "alice/memory/zebra.md", "- after")["pushed"] is True
+        assert remote.show("alice/memory/zebra.md").endswith("alice private note\n- after\n")
+    finally:
+        again.index.close()
+
+
+def test_a_rebase_left_behind_is_ended_before_the_next_round(
+    memex: Memex, origin: Origin, remote: Remote
+) -> None:
+    break_remote(memex, origin)
+    mine = memex.append(ALICE, "alice/memory/zebra.md", "- mine")
+    writer_commit(origin, "theirs", {"bob/memory/garden.md": "# Garden\n\nbeans\n"})
+    mend_remote(memex, origin)
+    git(memex.root, "fetch", "-q", "origin")
+    # A rebase that stopped half-way, as a timeout leaves it.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("GIT_SEQUENCE_EDITOR", "sed -i '1i break'")
+        git(memex.root, "rebase", "-q", "-i", "origin/main")
+    assert (memex.root / ".git/rebase-merge").exists()
+    assert memex.refresh() is True
+    assert conflict_branches(origin) == []
+    assert remote.show("alice/memory/zebra.md").endswith("- mine\n")
+    assert mine["commit"] != remote.head()
+
+
+SERVER_TIME = "2026-05-01T10:00:00+00:00"
+DECK_AUTHORED = "2026-04-20T10:00:00+00:00"
+DECK_LANDED = "2026-05-02T10:00:00+00:00"
+
+
+def test_updated_is_when_the_last_change_landed(memex: Memex, origin: Origin) -> None:
+    commit_at(origin, FIRST, {"alice/memory/tapir.md": "# Tapir\n\none\n"})
+    commit_at(origin, SERVER_TIME, {"alice/memory/tapir.md": "# Tapir\n\ntwo\n"})
+    # Written on a laptop before the server's change, rebased on top of it later.
+    git(origin.work, "pull", "-q", "--ff-only")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("GIT_AUTHOR_DATE", DECK_AUTHORED)
+        patch.setenv("GIT_COMMITTER_DATE", DECK_LANDED)
+        origin.commit("laptop", {"alice/memory/tapir.md": "# Tapir\n\nthree\n"})
+    memex.refresh()
+    note = memex.read(ALICE, "alice/memory/tapir.md")
+    assert (note["created"], note["updated"]) == (FIRST, DECK_LANDED)
+
+
+def refuse_pushes(origin: Origin) -> None:
+    hook = origin.bare / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\necho 'protected branch' >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+
+def test_a_push_the_remote_refuses_is_reported_honestly(
+    memex: Memex, origin: Origin, remote: Remote
+) -> None:
+    refuse_pushes(origin)
+    head = remote.head()
+    result = memex.append(ALICE, "alice/memory/zebra.md", "- refused")
+    assert (result["pushed"], result.get("notice")) == (False, PUSH_REFUSED)
+    assert memex.health()["repo"] == "failing"
+    assert remote.head() == head
+    assert git(memex.root, "rev-parse", "HEAD").strip() == result["commit"]
+    memex.refresh_round(first=False)
+    assert memex.health()["repo"] == "failing"
+    (origin.bare / "hooks" / "pre-receive").unlink()
+    memex.refresh_round(first=False)
+    assert memex.health()["repo"] == "ok"
+    assert remote.head() == result["commit"]
+
+
+def test_with_writing_off_nothing_is_written_and_the_loop_only_fast_forwards(
+    tmp_path: Path, origin: Origin, remote: Remote
+) -> None:
+    memex = Memex.from_config(make_config(tmp_path, origin, write={"enabled": False}), None)
+    memex.prepare()
+    try:
+        with pytest.raises(InvalidRequest, match=WRITING_DISABLED):
+            memex.append(ALICE, "alice/memory/zebra.md", "- x")
+        # A commit of its own, as an earlier run with writing on could have left.
+        (memex.root / "alice/memory/zebra.md").write_text("# local\n", encoding="utf-8")
+        git(memex.root, "commit", "-q", "-am", "local")
+        head = remote.head()
+        writer_commit(origin, "theirs", {"bob/memory/garden.md": "# Garden\n\nbeans\n"})
+        assert memex.refresh() is False
+        assert remote.head() != head  # the writer's commit, nothing of the server's
+        assert remote.show("alice/memory/zebra.md") != "# local\n"
+        assert conflict_branches(origin) == []
     finally:
         memex.index.close()

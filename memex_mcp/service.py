@@ -41,6 +41,7 @@ from memex_mcp.notes import (
     check_version,
     checked_line,
     checked_section,
+    checked_topic,
     commit_message,
     decode,
     edited,
@@ -48,12 +49,13 @@ from memex_mcp.notes import (
     index_spot,
     is_daily,
     master_entry,
+    master_link,
     new_index,
     new_note,
     section_names,
     version_of,
     with_entry,
-    with_line,
+    with_topic,
 )
 from memex_mcp.repo import CONFLICT_PREFIX, WRITER, Author, GitError, GitRepo, Push
 from memex_mcp.rights import (
@@ -96,9 +98,14 @@ CHECK_TEXT = "memex health check"
 # fetches and applies its change again this many times.
 PUSH_RETRIES = 3
 NOT_PUSHED = (
-    "Saved, not yet pushed: the git host did not take the commit now; "
-    "the server pushes it in the background."
+    "Saved in the server's clone, not yet pushed: the git host did not take the commit; "
+    "the server tries again in every refresh round."
 )
+PUSH_REFUSED = (
+    "Saved in the server's clone, but the git host refused the push; it stays unpushed "
+    "until the server's operator fixes the cause (the server's health reports it)."
+)
+WRITING_DISABLED = "writing is disabled on this server"
 NOT_SEARCHABLE = "Saved, but search does not show the change yet; it catches up by itself."
 EXISTS = "a note already exists at this path; read it, then use edit or append"
 CONFLICT_PARKED = (
@@ -186,6 +193,16 @@ class _Change:
     action: Action
     path: str
     content: bytes | None = None  # None deletes the file
+
+
+@dataclass(frozen=True)
+class IndexLine:
+    """How create lists a new note: the section of its index, the note's line there,
+    and, for the first note of a new wiki topic, the topic's line in the master index."""
+
+    section: str | None = None
+    line: str | None = None
+    topic: str | None = None
 
 
 @dataclass(frozen=True)
@@ -433,13 +450,17 @@ class Memex:
         identity: Identity,
         path: str,
         content: str,
-        index_section: str | None = None,
-        index_line: str | None = None,
+        listing: IndexLine | None = None,
     ) -> WriteResult:
-        """A new note plus its line in its index; daily notes take no index line."""
+        """A new note plus its line in its topic's index; daily notes take no index line.
+
+        The first note of a new wiki topic also needs ``listing.topic``, the
+        topic's line in the master index.
+        """
+        texts = listing or IndexLine()
 
         def plan(parts: tuple[str, ...], target: Path) -> _Plan:
-            return self._plan_create(parts, target, content, index_section, index_line)
+            return self._plan_create(parts, target, content, texts)
 
         return self._write(identity, path, "create", plan)
 
@@ -501,12 +522,7 @@ class Memex:
         }
 
     def _plan_create(
-        self,
-        parts: tuple[str, ...],
-        target: Path,
-        content: str,
-        index_section: str | None,
-        index_line: str | None,
+        self, parts: tuple[str, ...], target: Path, content: str, texts: IndexLine
     ) -> _Plan:
         # Checked first: where a note may go depends on its path alone.
         spot = None if is_daily(parts) else index_spot(parts)
@@ -520,18 +536,22 @@ class Memex:
             return _Plan(changes=(note,), version=version_of(data))
         index_parts, current = self._find_index(spot)
         sections = section_names(current or "")
-        section = checked_section(index_section, sections)
-        line = checked_line(index_line, sections)
-        check_secrets([content, section, line])
-        entry = index_entry(spot.folder, parts, index_parts[:-1], line)
+        section = checked_section(texts.section, sections)
+        line = checked_line(texts.line, sections)
+        new_topic = current is None and spot.folder == "wiki"
+        topic = ""
+        if new_topic:
+            topic = checked_topic(texts.topic)
+        check_secrets([content, section, line, topic])
+        entry = index_entry(spot.folder, parts, spot.topic, line)
         text = with_entry(new_index(spot) if current is None else current, section, entry)
         index_path = "/".join(index_parts)
         changes = [
             note,
             _Change("create" if current is None else "update", index_path, text.encode()),
         ]
-        if current is None and spot.folder == "wiki":
-            changes += self._master_change(spot)
+        if new_topic:
+            changes += self._master_change(spot, topic)
         return _Plan(changes=tuple(changes), version=version_of(data), index=index_path)
 
     def _plan_change(self, action: Action, parts: tuple[str, ...], data: bytes) -> _Plan:
@@ -559,21 +579,21 @@ class Memex:
         return decode(file.read_bytes()) if file.exists() else None
 
     def _find_index(self, spot: IndexSpot) -> tuple[tuple[str, ...], str | None]:
-        """The nearest existing index of ``spot`` and its text, else where the topic's goes."""
-        for folder in spot.candidates:
-            text = self._index_file((*folder, spot.name))
-            if text is not None:
-                return (*folder, spot.name), text
-        return (*spot.topic, spot.name), None
+        """The topic's index and its text, None while the topic has none."""
+        parts = (*spot.topic, spot.name)
+        return parts, self._index_file(parts)
 
-    def _master_change(self, spot: IndexSpot) -> list[_Change]:
-        """The master index's line for a wiki topic whose index is new, unless it has one."""
+    def _master_change(self, spot: IndexSpot, description: str) -> list[_Change]:
+        """The master index's line for a wiki topic whose index is new, unless it has one.
+
+        The line goes to the end of the master index's first section.
+        """
         parts = (*spot.topic[:2], MASTER_INDEX)
         current = self._index_file(parts)
-        entry = master_entry(spot.topic)
-        if current is not None and entry.split("|", 1)[0] in current:
+        if current is not None and master_link(spot.topic) in current:
             return []
-        text = with_line(NEW_MASTER_INDEX if current is None else current, entry)
+        entry = master_entry(spot.topic, description)
+        text = with_topic(NEW_MASTER_INDEX if current is None else current, entry)
         action: Action = "create" if current is None else "update"
         return [_Change(action, "/".join(parts), text.encode())]
 
@@ -596,29 +616,35 @@ class Memex:
         each time the remote turns the push down.
         """
         self.policy.areas_for(identity)
+        if not self.config.write.enabled:
+            raise InvalidRequest(WRITING_DISABLED)
         parts = split_write_path(path)
         area = self.policy.may_write(identity, parts, operation)
+        # The file name goes into the commit message and the index.
+        check_secrets(["/".join(parts)])
         author = self._author(identity)
         with self._git_lock:
             try:
-                plan, commit, pushed = self._commit_and_push(parts, area, plan_of, author)
+                plan, commit, outcome = self._commit_and_push(parts, area, plan_of, author)
             finally:
                 searchable = self._reindex()
         result: WriteResult = {
             "path": "/".join(parts),
             "commit": commit,
-            "pushed": pushed,
+            "pushed": outcome is Push.PUSHED,
             "searchable": searchable,
         }
         if plan.version is not None:
             result["version"] = plan.version
         if operation == "create":
             result["index"] = plan.index
-        notices = [
-            text
-            for text, shown in ((NOT_PUSHED, not pushed), (NOT_SEARCHABLE, not searchable))
-            if shown
-        ]
+        notices: list[str] = []
+        if outcome is Push.REFUSED:
+            notices.append(PUSH_REFUSED)
+        elif outcome is not Push.PUSHED:
+            notices.append(NOT_PUSHED)
+        if not searchable:
+            notices.append(NOT_SEARCHABLE)
         if notices:
             result["notice"] = " ".join(notices)
         return result
@@ -629,24 +655,37 @@ class Memex:
         area: str,
         plan_of: Callable[[tuple[str, ...], Path], _Plan],
         author: Author,
-    ) -> tuple[_Plan, str, bool]:
+    ) -> tuple[_Plan, str, Push]:
+        """Commit the write and push it; when the remote has newer commits, apply it again
+        on them, up to PUSH_RETRIES times.
+
+        When the clone's earlier saved commits cannot be brought onto the remote
+        (they conflict, and no conflict branch could be pushed), the write is
+        applied once more on top of them and saved without another push.
+        """
         attempt = 0
+        stuck = False
         while True:
             base = self.repo.head()
             plan = plan_of(parts, resolve_write(self.root, parts, area))
             commit = self._commit(plan, author, base)
-            outcome = self.repo.push()
-            if outcome is not Push.REJECTED or attempt == PUSH_RETRIES:
+            outcome = Push.REJECTED if stuck else self.repo.push()
+            if outcome is not Push.REJECTED or attempt == PUSH_RETRIES or stuck:
                 break
             attempt += 1
             log.info("the remote has newer commits; applying the write again on them (%d)", attempt)
-            if not self._refetch(base):
+            fetched = self._refetch(base)
+            if fetched is None:
                 break
-        if outcome is not Push.PUSHED:
+            stuck = not fetched
+        if outcome is Push.REFUSED:
+            self._repo_failed = True
+            log.error("the remote refused the push of %s; it stays in the clone", commit[:12])
+        elif outcome is not Push.PUSHED:
             log.warning(
                 "saved %s locally; the remote did not take it (%s)", commit[:12], outcome.value
             )
-        return plan, commit, outcome is Push.PUSHED
+        return plan, commit, outcome
 
     def _commit(self, plan: _Plan, author: Author, base: str) -> str:
         """Write the plan's files and commit them; on any failure the tree goes back to ``base``."""
@@ -670,19 +709,21 @@ class Memex:
                 if change.content is None:
                     _remove_empty_folders(self.root, change.path)
 
-    def _refetch(self, base: str) -> bool:
-        """Fetch after a turned-down push and go back to ``base`` on the new remote state.
+    def _refetch(self, base: str) -> bool | None:
+        """Fetch after a turned-down push, drop the write's commit and bring ``base`` onto
+        the new remote state.
 
-        Returns False, keeping the commit to push later, when the fetch fails.
+        Returns None, keeping the commit to push later, when the fetch fails;
+        else whether the clone now sits on the remote (False: its earlier saved
+        commits conflict and could not be put on a conflict branch).
         """
         try:
             self.repo.fetch()
         except GitError as exc:
             log.warning("could not fetch after a turned-down push: %s", exc)
-            return False
+            return None
         self.repo.reset_hard(base)
-        self._integrate(push=False)
-        return True
+        return self._integrate(push=False)
 
     def _reindex(self) -> bool:
         """Bring the search index to the clone's HEAD; a failure leaves it to the next round."""
@@ -697,7 +738,11 @@ class Memex:
 
     def prepare(self) -> None:
         """Clone if needed, open the index and bring it to the clone's HEAD."""
-        if not self.repo.is_repo():
+        if self.repo.is_repo():
+            # The server owns its clone: whatever a crash left between writing and
+            # committing (a changed note, a temporary file, a rebase) is dropped.
+            self.repo.restore()
+        else:
             remote = self.config.repo.remote
             if not remote:
                 raise RuntimeError(
@@ -742,6 +787,7 @@ class Memex:
             return False
         with self._git_lock:
             try:
+                self.repo.abort_rebase()
                 synced = self._integrate(push=True)
             except GitError as exc:
                 log.warning("could not update the clone, serving the last state: %s", exc)
@@ -753,9 +799,10 @@ class Memex:
     def _integrate(self, push: bool) -> bool:
         """Bring the clone onto the fetched remote; with ``push``, push its own commits.
 
-        Returns whether nothing of the clone's own is left to push.
+        Returns whether nothing of the clone's own is left to push. With writing
+        off, the clone only fast-forwards.
         """
-        ahead = self.repo.ahead()
+        ahead = self.repo.ahead() if self.config.write.enabled else 0
         if ahead == 0:
             self.repo.fast_forward()
             return True
@@ -763,10 +810,13 @@ class Memex:
             return self._park_conflict()
         if not push:
             return True
-        if self.repo.push() is Push.PUSHED:
+        outcome = self.repo.push()
+        if outcome is Push.PUSHED:
             log.info("pushed %d commits saved while the remote was not taking them", ahead)
             return True
-        log.warning("could not push %d saved commits; trying again next round", ahead)
+        log.warning(
+            "could not push %d saved commits (%s); trying again next round", ahead, outcome.value
+        )
         return False
 
     def _park_conflict(self) -> bool:
@@ -875,11 +925,13 @@ class Memex:
         self._check_failed = False
 
     def refresh_round(self, first: bool) -> None:
-        """One round of the refresh loop: fetch and re-index (not in the first round,
-        which follows ``prepare``), check the embedder, fill in vectors.
+        """One round of the refresh loop: fetch, bring the clone onto the remote, push saved
+        commits and re-index (not in the first round, which follows ``prepare``), check the
+        embedder, fill in vectors.
 
-        The repo counts as failing until a round passes without a failed fetch or
-        fast-forward and without raising.
+        The repo counts as failing until a round passes without a failed fetch,
+        merge, rebase or push and without raising; a conflict branch on the
+        remote shows as conflict instead (see ``health``).
         """
         try:
             fresh = first or self.refresh()

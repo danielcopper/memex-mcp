@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import posixpath
 import re
+import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -29,8 +30,21 @@ MAX_INDEX_LINE_CHARS = 300
 MAX_SECTION_CHARS = 100
 # The level of the headings that open an index's sections (``## Section``).
 SECTION_LEVEL = 2
+# A topic folder's path: area, memory or wiki, topic.
+_TOPIC_DEPTH = 3
+# What no line of an index may hold: control characters, line and paragraph
+# separators, and format characters such as bidi overrides.
+_HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+HTML_COMMENT = "<!--"
+# Claude Code reads "@path" at the start of a word, in a MEMORY.md it loads,
+# as an import of that file.
+_IMPORT = re.compile(r"(?<!\w)@")
 
 CHANGED_SINCE_READ = "the note changed since you read it; read it again"
+MISSING_TOPIC = (
+    "the first note of a new wiki topic needs topic_description, one line that says "
+    "what the topic holds, for the master index"
+)
 
 # Unambiguous machine secrets only, never passwords in prose. Each pattern is
 # linear: the text is untrusted and checked while the clone is locked.
@@ -135,51 +149,76 @@ def is_daily(parts: tuple[str, ...]) -> bool:
 
 @dataclass(frozen=True)
 class IndexSpot:
-    """Where the index of a note may be: each folder from the note's own up to its topic's."""
+    """The index a new note goes into: the one of its topic, by kind."""
 
     folder: Folder
-    # Nearest first; the last is the topic folder, where a missing index is created.
-    candidates: tuple[tuple[str, ...], ...]
+    # The topic folder: <area>/<folder>/<topic>, or <area>/memory itself.
+    topic: tuple[str, ...]
 
     @property
     def name(self) -> str:
         return INDEX_FILE[self.folder]
 
-    @property
-    def topic(self) -> tuple[str, ...]:
-        return self.candidates[-1]
-
 
 def index_spot(parts: tuple[str, ...]) -> IndexSpot:
-    """The folders whose index file a new note at ``parts`` goes into, nearest first.
+    """The topic whose index a new note at ``parts`` is listed in.
 
     The topic is the folder directly under ``<area>/memory/`` or
-    ``<area>/wiki/``; a note directly in ``<area>/memory/`` has that folder
-    as its topic. A note directly in ``<area>/wiki/`` has none: the master
-    index there lists topics, not notes. ``parts`` passed ``Policy.may_write``.
+    ``<area>/wiki/``: a note in a subfolder of a topic is listed in the
+    topic's index, whatever index files the subfolders hold. A note directly
+    in ``<area>/memory/`` is listed in ``<area>/memory/MEMORY.md``; one
+    directly in ``<area>/wiki/`` is refused, since the master index there
+    lists topics, not notes. ``parts`` passed ``Policy.may_write``.
     """
     folder: Folder = "memory" if parts[1] == "memory" else "wiki"
     note_folder = parts[:-1]
-    if folder == "wiki" and len(note_folder) < 3:  # noqa: PLR2004 - area/wiki/topic
+    if folder == "wiki" and len(note_folder) < _TOPIC_DEPTH:
         raise InvalidRequest(
             f"wiki notes go into a topic folder: {parts[0]}/wiki/<topic>/{parts[-1]}"
         )
-    topic_depth = 3 if len(note_folder) >= 3 else 2  # noqa: PLR2004 - area/folder/topic
-    candidates = tuple(
-        note_folder[:depth] for depth in range(len(note_folder), topic_depth - 1, -1)
-    )
-    return IndexSpot(folder=folder, candidates=candidates)
+    return IndexSpot(folder=folder, topic=note_folder[:_TOPIC_DEPTH])
+
+
+def _lines(text: str) -> list[str]:
+    """The lines of an index, split at line feeds only.
+
+    Other characters Python takes for line breaks (form feed, U+0085,
+    U+2028) stay inside their line, so adding an entry changes no other byte.
+    """
+    lines = text.split("\n")
+    if lines and not lines[-1]:
+        lines.pop()
+    return [line.removesuffix("\r") for line in lines]
 
 
 def section_names(text: str) -> list[str]:
     """The sections of an index: its level-two headings, in order."""
-    return [name for _, level, name in headings(text.splitlines()) if level == SECTION_LEVEL]
+    return [name for _, level, name in headings(_lines(text)) if level == SECTION_LEVEL]
 
 
 def _sections_hint(sections: Sequence[str]) -> str:
     if not sections:
         return "the index has no sections yet; name a new one"
     return "its sections: " + "; ".join(sections)
+
+
+def _text_problem(text: str, limit: int) -> str | None:
+    """Why ``text`` cannot be one line of an index, or None.
+
+    Control characters and line breaks would split it; format characters
+    (bidi overrides) and ``<!--`` can hide what follows in a rendered view;
+    an ``@`` starting a word is what Claude Code reads as a file to load
+    into the session, from a ``MEMORY.md`` it loads.
+    """
+    if len(text) > limit or any(unicodedata.category(c) in _HIDDEN_CATEGORIES for c in text):
+        return (
+            f"must be one line of at most {limit} characters, without control or format characters"
+        )
+    if HTML_COMMENT in text:
+        return f"must not contain '{HTML_COMMENT}'"
+    if _IMPORT.search(text):
+        return "must not have '@' at the start of a word, which assistants read as a file to load"
+    return None
 
 
 def checked_section(section: str | None, sections: Sequence[str]) -> str:
@@ -190,37 +229,51 @@ def checked_section(section: str | None, sections: Sequence[str]) -> str:
             "a new note needs index_section, the section of its index to list it under; "
             + _sections_hint(sections)
         )
-    if "\n" in name or "\r" in name or len(name) > MAX_SECTION_CHARS:
-        raise InvalidRequest(
-            f"index_section must be one line of at most {MAX_SECTION_CHARS} characters; "
-            + _sections_hint(sections)
-        )
+    problem = _text_problem(name, MAX_SECTION_CHARS)
+    if problem is not None:
+        raise InvalidRequest(f"index_section {problem}; " + _sections_hint(sections))
     return name
 
 
-def checked_line(index_line: str | None, sections: Sequence[str]) -> str:
-    line = (index_line or "").strip()
+def checked_line(value: str | None, sections: Sequence[str] | None) -> str:
+    """The note's line for its index; ``sections`` are the index's, for the refusal."""
+    return _checked_description(
+        value,
+        "index_line",
+        "a new note needs index_line, one line that says what the note holds; "
+        + _sections_hint(sections or []),
+    )
+
+
+def checked_topic(value: str | None) -> str:
+    """A new wiki topic's line for the master index."""
+    return _checked_description(
+        value,
+        "topic_description",
+        MISSING_TOPIC,
+    )
+
+
+def _checked_description(value: str | None, field: str, missing: str) -> str:
+    line = (value or "").strip()
     if not line:
-        raise InvalidRequest(
-            "a new note needs index_line, one line that says what the note holds; "
-            + _sections_hint(sections)
-        )
-    if "\n" in line or "\r" in line or len(line) > MAX_INDEX_LINE_CHARS:
-        raise InvalidRequest(
-            f"index_line must be one line of at most {MAX_INDEX_LINE_CHARS} characters"
-        )
+        raise InvalidRequest(missing)
+    problem = _text_problem(line, MAX_INDEX_LINE_CHARS)
+    if problem is not None:
+        raise InvalidRequest(f"{field} {problem}")
     return line
 
 
 def _link_target(relative: str) -> str:
-    """A Markdown link target; one with spaces or brackets goes inside angle brackets."""
+    """A Markdown link target; one with whitespace, parentheses or angle brackets goes
+    inside angle brackets."""
     return f"<{relative}>" if re.search(r"[\s()<>]", relative) else relative
 
 
 def index_entry(
-    folder: Folder, note: tuple[str, ...], index_folder: tuple[str, ...], description: str
+    folder: Folder, note: tuple[str, ...], topic: tuple[str, ...], description: str
 ) -> str:
-    """The index line for ``note`` in the index of ``index_folder``, in that index's format.
+    """The index line for ``note`` in its topic's index, in that index's format.
 
     Memory: ``- [<path>](<path>) — <description>``, the path relative to the
     index. Wiki: ``- [[<name>]] — <description>``, the note's name without
@@ -229,7 +282,7 @@ def index_entry(
     if folder == "wiki":
         name = note[-1].removesuffix(NOTE_SUFFIX)
         return f"- [[{name}]] — {description}"
-    relative = "/".join(note[len(index_folder) :])
+    relative = "/".join(note[len(topic) :])
     label = relative.replace("[", "\\[").replace("]", "\\]")
     return f"- [{label}]({_link_target(relative)}) — {description}"
 
@@ -238,16 +291,20 @@ def new_index(spot: IndexSpot) -> str:
     """The heading of an index the server creates for a topic that has none."""
     topic = spot.topic
     # A topic folder gives its name; an area's memory folder itself gives "<area> memory".
-    title = topic[-1] if len(topic) > 2 else " ".join(topic)  # noqa: PLR2004 - area/folder
+    title = topic[-1] if len(topic) == _TOPIC_DEPTH else " ".join(topic)
     return f"# {title}\n"
 
 
-def master_entry(topic: tuple[str, ...]) -> str:
-    """The master index's line for a new wiki topic, linked from the area's folder."""
-    return f"- [[{'/'.join(topic[1:])}/_index|{topic[-1]}]]"
+def master_link(topic: tuple[str, ...]) -> str:
+    """How the master index links a wiki topic, from the area's folder."""
+    return f"[[{'/'.join(topic[1:])}/_index|{topic[-1]}]]"
 
 
-NEW_MASTER_INDEX = "# Wiki master index\n"
+def master_entry(topic: tuple[str, ...], description: str) -> str:
+    return f"- {master_link(topic)} — {description}"
+
+
+NEW_MASTER_INDEX = "# Wiki master index\n\n## Topics\n"
 
 
 def _newline(text: str) -> str:
@@ -271,17 +328,16 @@ def with_entry(text: str, section: str, entry: str) -> str:
     """The index with ``entry`` as the last line of ``section``.
 
     A section whose name equals ``section`` ignoring case is that section; an
-    unknown one is added at the end of the index. The index keeps its line
-    endings.
+    unknown one is added at the end of the index. Every other line stays as it
+    was, line endings included.
     """
     newline = _newline(text)
-    lines = text.splitlines()
+    lines = _lines(text)
     found = headings(lines)
     position = _find_section(found, section)
     if position is None:
-        while lines and not lines[-1].strip():
-            lines.pop()
-        lines += ["", f"## {section}", "", entry]
+        gap = [""] if lines and lines[-1].strip() else []
+        lines += [*gap, f"## {section}", "", entry]
         return newline.join(lines) + newline
     start = found[position][0]
     following = [line for line, level, _ in found[position + 1 :] if level <= SECTION_LEVEL]
@@ -297,13 +353,14 @@ def with_entry(text: str, section: str, entry: str) -> str:
     return newline.join(lines) + newline
 
 
-def with_line(text: str, line: str) -> str:
-    """``text`` with ``line`` as its last line."""
+def with_topic(text: str, entry: str) -> str:
+    """The master index with ``entry`` as the last line of its first section,
+    or of the file when it has no section."""
+    sections = section_names(text)
+    if sections:
+        return with_entry(text, sections[0], entry)
     newline = _newline(text)
-    lines = text.splitlines()
-    while lines and not lines[-1].strip():
-        lines.pop()
-    return newline.join([*lines, line]) + newline
+    return newline.join([*_lines(text), entry]) + newline
 
 
 # -- commits -----------------------------------------------------------
