@@ -57,7 +57,12 @@ class GitRepo:
                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"},
             )
         except subprocess.TimeoutExpired:
-            raise GitError(f"git {args[0]} timed out after {self.timeout:g}s") from None
+            done = None
+        if done is None:
+            # Raised outside the except block: TimeoutExpired carries the
+            # command, which for a clone holds the remote and its credential,
+            # and would stay attached as __context__ even with ``from None``.
+            raise GitError(f"git {args[0]} timed out after {self.timeout:g}s")
         if done.returncode != 0:
             raise GitError(f"git {args[0]} failed: {redact(done.stderr.strip())}")
         return done.stdout

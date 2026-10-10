@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import sqlite3
 import time
 from collections.abc import Iterator
 from contextlib import closing
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -281,6 +283,21 @@ def test_git_errors_hide_a_password_with_a_slash(tmp_path: Path) -> None:
     with pytest.raises(GitError) as error:
         repo.clone("https://bot:s3/cret@127.0.0.1:9/memex.git")
     assert "cret" not in str(error.value)
+
+
+def test_a_timed_out_git_call_keeps_the_remote_out_of_the_error(tmp_path: Path) -> None:
+    # A listener that never accepts: git connects, sends its request and waits.
+    with socket.create_server(("127.0.0.1", 0)) as listener:
+        port = cast("int", listener.getsockname()[1])
+        repo = GitRepo(tmp_path / "clone", "main", 0.5)
+        with pytest.raises(GitError, match="timed out") as error:
+            repo.clone(f"http://bot:s3cret@127.0.0.1:{port}/memex.git")
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    chained: BaseException | None = error.value
+    while chained is not None:
+        assert "s3cret" not in f"{chained!s} {chained!r}"
+        chained = chained.__cause__ or chained.__context__
 
 
 def _commit_undecodable_name(origin: Origin) -> str:
