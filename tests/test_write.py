@@ -352,8 +352,8 @@ def test_delete_needs_the_version_read_returned(memex: Memex, remote: Remote) ->
     path = "alice/memory/archive/old-bike.md"
     read = memex.read(ALICE, path)
     head = remote.head()
-    for wrong in ("0" * 40, ""):
-        with pytest.raises(InvalidRequest):
+    for wrong, message in (("0" * 40, CHANGED_SINCE_READ), ("", "needs the note's version")):
+        with pytest.raises(InvalidRequest, match=re.escape(message)):
             memex.delete(ALICE, path, wrong)
     assert remote.head() == head
     memex.append(ALICE, path, "one more line")
@@ -699,3 +699,72 @@ def test_a_write_result_states_commit_push_and_version(memex: Memex) -> None:
     result = memex.create(ALICE, "alice/memory/daily/d.md", "# D\n")
     assert _result_keys(result) == {"path", "commit", "pushed", "searchable", "version", "index"}
     assert result["path"] == "alice/memory/daily/d.md"
+
+
+def test_the_folder_check_after_resolution_catches_a_symlink_the_walk_missed(
+    memex: Memex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (memex.root / "alice/memory/elsewhere").symlink_to("../../bob/memory")
+
+    # As if the link appeared between the walk and the write.
+    def never(_self: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(Path, "is_symlink", never)
+    with pytest.raises(NotFound):
+        create(memex, ALICE, "alice/memory/elsewhere/new.md")
+    assert not (memex.root / "bob/memory/new.md").exists()
+
+
+def test_a_file_in_the_way_of_a_folder_answers_like_a_missing_note(memex: Memex) -> None:
+    assert refusal(lambda: create(memex, ALICE, "alice/memory/zebra.md/inner.md")) == (
+        NotFound,
+        NOTE_NOT_FOUND,
+    )
+
+
+def test_an_index_that_is_a_symlink_is_never_written(topics: Memex) -> None:
+    index = topics.root / "alice/memory/homelab/MEMORY.md"
+    index.unlink()
+    index.symlink_to("../../../bob/memory/garden.md")
+    with pytest.raises(NotFound):
+        topics.create(ALICE, "alice/memory/homelab/new.md", "# New\n", "Notes", LINE)
+    assert (
+        clone_file(topics, "bob/memory/garden.md")
+        == "# Garden\n\nThe tomatoes need water every evening.\n"
+    )
+
+
+def test_a_master_index_line_is_not_added_twice(topics: Memex, remote: Remote) -> None:
+    # The topic's own index went missing, its master index line did not.
+    topics.create(ALICE, "alice/wiki/networking/vlan.md", "# VLAN\n", "Basics", "tagging")
+    (topics.root / "alice/wiki/networking/_index.md").unlink()
+    git(topics.root, "commit", "-q", "-am", "index gone")
+    master = remote.show("alice/wiki/_master-index.md").replace(
+        "[[wiki/networking/_index|Networking]]", "[[wiki/cooking/_index|cooking]]"
+    )
+    (topics.root / "alice/wiki/_master-index.md").write_text(master, encoding="utf-8")
+    git(topics.root, "commit", "-q", "-am", "master names cooking")
+    topics.create(ALICE, "alice/wiki/cooking/bread.md", "# Bread\n", "Baking", "sourdough")
+    assert remote.show("alice/wiki/_master-index.md").count("wiki/cooking/_index") == 1
+
+
+def test_a_note_that_is_not_utf8_is_not_changed(memex: Memex, origin: Origin) -> None:
+    (origin.work / "alice/memory/latin1.md").write_bytes(b"# Caf\xe9\n")
+    origin.commit("latin-1")
+    memex.refresh()
+    for call in (
+        lambda: memex.append(ALICE, "alice/memory/latin1.md", "more"),
+        lambda: memex.edit(ALICE, "alice/memory/latin1.md", "Caf", "Bar"),
+    ):
+        with pytest.raises(InvalidRequest, match="not UTF-8"):
+            call()
+    assert (memex.root / "alice/memory/latin1.md").read_bytes() == b"# Caf\xe9\n"
+
+
+def test_a_note_needs_content(memex: Memex, remote: Remote) -> None:
+    head = remote.head()
+    for empty in ("", "  \n\n"):
+        with pytest.raises(InvalidRequest, match="content must not be empty"):
+            memex.create(ALICE, "alice/memory/daily/empty.md", empty)
+    assert remote.head() == head

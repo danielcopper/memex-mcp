@@ -370,3 +370,14 @@ async def test_health_reads_conflict_while_a_conflict_branch_exists(
         response = await client.get("/healthz")
         assert response.status_code == 200
         assert '"repo":"conflict"' in response.text
+
+
+@pytest.mark.anyio
+async def test_a_text_longer_than_a_note_may_be_is_refused_before_the_service(
+    tmp_path: Path, origin: Origin
+) -> None:
+    async with serving(tmp_path, origin) as (client, memex):
+        too_long = "x" * (memex.config.write.max_note_bytes + 1)
+        result = await call(client, token(), "append", path="alice/memory/zebra.md", text=too_long)
+        assert result["isError"] is True
+        assert "at most 65536 characters" in result["content"][0]["text"]

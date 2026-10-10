@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import logging
+import socket
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from memex_mcp.repo import CONFLICT_PREFIX, GitRepo, Push
-from memex_mcp.rights import InvalidRequest
+from memex_mcp.rights import Identity, InvalidRequest
 from memex_mcp.service import NOT_PUSHED, PUSH_RETRIES, Memex
-from tests.conftest import ALICE, BOB, Origin, git
+from tests.conftest import ALICE, BOB, Origin, git, make_config
 from tests.test_write import Remote
 
 
@@ -350,3 +352,55 @@ def test_dates_cost_no_git_call_at_query_time(
     assert hits
     assert all(hit["created"] is not None for hit in hits)
     assert memex.read(ALICE, "alice/memory/zebra.md")["created"] is not None
+
+
+def test_a_file_name_with_glob_characters_names_only_itself(memex: Memex, origin: Origin) -> None:
+    commit_at(origin, FIRST, {"alice/memory/x.md": "# X\n"})
+    commit_at(origin, SECOND, {"alice/memory/[x].md": "# Bracketed\n"})
+    memex.refresh()
+    note = memex.read(ALICE, "alice/memory/[x].md")
+    assert (note["created"], note["updated"]) == (SECOND, SECOND)
+    result = memex.append(ALICE, "alice/memory/[x].md", "- more")
+    assert git(memex.root, "show", "--name-only", "--format=", result["commit"]).split() == [
+        "alice/memory/[x].md"
+    ]
+
+
+def test_a_path_that_looks_like_pathspec_magic_names_only_itself(
+    tmp_path: Path, origin: Origin
+) -> None:
+    # Area names may hold ":" and parentheses; git would read ":(top)eve/…" as "eve/…".
+    area = ":(top)eve"
+    memex = Memex.from_config(make_config(tmp_path, origin, users={"eve": area}), None)
+    memex.prepare()
+    try:
+        eve = Identity("eve", frozenset({"memex"}))
+        result = memex.create(eve, f"{area}/memory/daily/d.md", "# D\n\nmarmoset\n")
+        assert result["pushed"] is True
+        assert git(origin.bare, "show", f"main:{area}/memory/daily/d.md") == "# D\n\nmarmoset\n"
+        note = memex.read(eve, f"{area}/memory/daily/d.md")
+        assert note["created"] is not None
+    finally:
+        memex.index.close()
+
+
+def test_a_push_that_times_out_keeps_the_commit(
+    tmp_path: Path, origin: Origin, remote: Remote
+) -> None:
+    memex = Memex.from_config(
+        make_config(tmp_path, origin, repo={"git_timeout_seconds": 0.5}), None
+    )
+    memex.prepare()
+    try:
+        # A listener that never accepts: git connects, sends its request and waits.
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            port = cast("int", listener.getsockname()[1])
+            git(memex.root, "remote", "set-url", "origin", f"http://127.0.0.1:{port}/memex.git")
+            result = memex.create(ALICE, "alice/memory/daily/slow.md", "# Slow\n")
+        assert (result["pushed"], result.get("notice")) == (False, NOT_PUSHED)
+        assert git(memex.root, "rev-parse", "HEAD").strip() == result["commit"]
+        mend_remote(memex, origin)
+        assert memex.refresh() is True
+        assert remote.head() == result["commit"]
+    finally:
+        memex.index.close()

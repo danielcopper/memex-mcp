@@ -176,7 +176,10 @@ class GitRepo:
     def push(self, ref: str = "HEAD", branch: str | None = None) -> Push:
         """Push ``ref`` to ``branch`` (the followed branch by default), never forcing."""
         target = f"refs/heads/{branch or self.branch}"
-        done = self._run("push", "--porcelain", "origin", f"{ref}:{target}")
+        try:
+            done = self._run("push", "--porcelain", "origin", f"{ref}:{target}")
+        except GitError:  # timed out: the commit stays, to be pushed later
+            return Push.FAILED
         if done.returncode == 0:
             return Push.PUSHED
         # A ref the remote turned down for lack of commits reads "!<tab>…<tab>[rejected] …".
