@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/danielcopper/memex-mcp/compare/v0.1.2...v0.1.3) (2026-10-10)
+
+
+### Bug Fixes
+
+* make the auth and embedding log lines say what went wrong ([#15](https://github.com/danielcopper/memex-mcp/issues/15)) ([a03e984](https://github.com/danielcopper/memex-mcp/commit/a03e984e08ebac3245a2ded8c3a5d0d72a49763a))
+* refuse config values that break the server at startup ([#13](https://github.com/danielcopper/memex-mcp/issues/13)) ([df869d6](https://github.com/danielcopper/memex-mcp/commit/df869d67eb7a63148463e2bcc17ae0544d2d7d8f))
+
 ## [0.1.2](https://github.com/danielcopper/memex-mcp/compare/v0.1.1...v0.1.2) (2026-10-09)
 
 

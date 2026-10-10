@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memex-mcp"
-version = "0.1.2"
+version = "0.1.3"
 description = "MCP server for a shared, per-person Markdown memory in git: search and read with rights from your identity provider"
 readme = "README.md"
 requires-python = ">=3.12"
