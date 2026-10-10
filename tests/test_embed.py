@@ -515,3 +515,228 @@ def test_a_compressed_answer_is_not_decoded_while_the_deadline_runs() -> None:
     message = message_for(response, timeout=0.2)
     assert message == "the answer is compressed ('gzip'), which the embedder should not do"
     assert time.monotonic() - started < 1.0
+
+
+# -- the check: Ollama's model list ---------------------------------------
+
+
+def listing(*names: str) -> dict[str, object]:
+    """A model list as Ollama answers it, each entry naming its model twice."""
+    return {"models": [{"name": name, "model": name, "size": 1} for name in names]}
+
+
+def checker(handler: httpx2.MockTransport, model: str = "bge-m3") -> OllamaEmbedder:
+    return OllamaEmbedder("http://ollama.example.org:11434/", model, 3, transport=streamed(handler))
+
+
+def check_message(answer: httpx2.Response | httpx2.MockTransport, timeout: float = 1.0) -> str:
+    """The EmbeddingError of a check against ``answer``, a fixed answer or a transport."""
+    transport = (
+        answer
+        if isinstance(answer, httpx2.MockTransport)
+        else httpx2.MockTransport(lambda _request: answer)
+    )
+    with pytest.raises(EmbeddingError) as raised:
+        checker(transport).check(timeout=timeout)
+    return str(raised.value)
+
+
+def test_the_check_reads_the_model_list_and_loads_nothing() -> None:
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, json=listing("nomic-embed-text:latest", "bge-m3:latest"))
+
+    checker(httpx2.MockTransport(handler)).check(timeout=1.0)
+    assert [(r.method, r.url.path, r.content) for r in requests] == [("GET", "/api/tags", b"")]
+    assert requests[0].headers["accept-encoding"] == "identity"
+
+
+@pytest.mark.parametrize(
+    ("model", "entry", "listed"),
+    [
+        ("bge-m3", {"name": "bge-m3:latest", "model": "bge-m3:latest"}, True),
+        ("bge-m3", {"name": "bge-m3", "model": "bge-m3"}, True),
+        ("bge-m3:latest", {"name": "bge-m3:latest", "model": "bge-m3:latest"}, True),
+        ("bge-m3:567m", {"name": "bge-m3:567m", "model": "bge-m3:567m"}, True),
+        ("bge-m3", {"model": "bge-m3:latest"}, True),
+        ("bge-m3", {"name": "bge-m3:latest"}, True),
+        (
+            "registry.example.org:5000/team/bge-m3",
+            {"name": "registry.example.org:5000/team/bge-m3:latest"},
+            True,
+        ),
+        ("bge-m3:567m", {"name": "bge-m3:latest", "model": "bge-m3:latest"}, False),
+        ("bge-m3:latest", {"name": "bge-m3", "model": "bge-m3"}, False),
+        ("bge-m3", {"name": "bge-m3:567m", "model": "bge-m3:567m"}, False),
+        ("bge-m3", {"name": "bge-m3-large:latest", "model": "bge-m3-large:latest"}, False),
+        ("bge", {"name": "bge-m3:latest", "model": "bge-m3:latest"}, False),
+        ("bge-m3", {"name": "team/bge-m3:latest", "model": "team/bge-m3:latest"}, False),
+        ("bge-m3", {"name": ["bge-m3:latest"], "model": None}, False),
+        ("library/bge-m3", {"name": "bge-m3:latest", "model": "bge-m3:latest"}, True),
+        (
+            "registry.ollama.ai/library/bge-m3",
+            {"name": "bge-m3:latest", "model": "bge-m3:latest"},
+            True,
+        ),
+        (
+            "registry.ollama.ai/library/bge-m3:567m",
+            {"name": "bge-m3:567m", "model": "bge-m3:567m"},
+            True,
+        ),
+        (
+            "registry.ollama.ai/team/bge-m3",
+            {"name": "team/bge-m3:latest", "model": "team/bge-m3:latest"},
+            True,
+        ),
+        ("team/bge-m3", {"name": "bge-m3:latest", "model": "bge-m3:latest"}, False),
+        (
+            "registry.example.org/library/bge-m3",
+            {"name": "bge-m3:latest", "model": "bge-m3:latest"},
+            False,
+        ),
+        (
+            "registry.example.org/library/bge-m3",
+            {"name": "registry.example.org/library/bge-m3:latest"},
+            True,
+        ),
+        ("registry.ollama.ai/bge-m3", {"name": "bge-m3:latest", "model": "bge-m3:latest"}, False),
+    ],
+    ids=[
+        "no-tag-listed-latest",
+        "no-tag-listed-bare",
+        "latest",
+        "other-tag",
+        "model-member-only",
+        "name-member-only",
+        "colon-in-host",
+        "other-tag-not-latest",
+        "tag-needs-exact",
+        "no-tag-is-not-any-tag",
+        "longer-name",
+        "prefix",
+        "other-namespace",
+        "names-not-text",
+        "default-namespace",
+        "default-host-and-namespace",
+        "default-host-and-namespace-tagged",
+        "default-host-other-namespace",
+        "other-namespace-configured",
+        "other-host-keeps-namespace",
+        "other-host-listed-whole",
+        "two-parts-are-namespace-and-model",
+    ],
+)
+def test_the_check_matches_the_model_name_as_ollama_lists_it(
+    model: str, entry: dict[str, object], listed: bool
+) -> None:
+    response = httpx2.Response(200, json={"models": [entry]})
+    client = checker(httpx2.MockTransport(lambda _request: response), model)
+    if listed:
+        client.check(timeout=1.0)
+    else:
+        with pytest.raises(EmbeddingError, match="Ollama does not list the model"):
+            client.check(timeout=1.0)
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        (httpx2.Response(200, json=listing()), "Ollama does not list the model 'bge-m3'"),
+        (
+            httpx2.Response(200, json=listing("nomic-embed-text:latest")),
+            "Ollama does not list the model 'bge-m3'",
+        ),
+        (httpx2.Response(200, json={"models": None}), "models is null, not a list"),
+        (httpx2.Response(200, json={"models": ["bge-m3:latest"]}), "Ollama does not list"),
+        (httpx2.Response(200, json=["bge-m3:latest"]), "the answer is a list, not an object"),
+        (
+            httpx2.Response(200, json={"embeddings": []}),
+            "the answer has no 'models' member (it has: 'embeddings'); "
+            + "is [embeddings] url Ollama's API?",
+        ),
+        (httpx2.Response(200, text="not json"), "JSONDecodeError"),
+        (
+            httpx2.Response(500, json={"error": "out of memory"}),
+            "HTTP 500 Internal Server Error; Ollama says 'out of memory'",
+        ),
+        (httpx2.Response(404), "HTTP 404 Not Found"),
+    ],
+    ids=[
+        "empty",
+        "not-listed",
+        "models-null",
+        "entries-not-objects",
+        "not-an-object",
+        "no-models-member",
+        "not-json",
+        "error-status",
+        "no-such-route",
+    ],
+)
+def test_a_bad_model_list_fails_the_check(response: httpx2.Response, message: str) -> None:
+    assert message in check_message(response)
+
+
+def test_an_unreachable_ollama_fails_the_check() -> None:
+    message = check_message(raising(httpx2.ConnectError("connection refused")))
+    assert message == "ConnectError: connection refused"
+
+
+# The model list's size limit: 1 MiB.
+TAGS_LIMIT = 1_048_576
+TAGS_ANSWER = json.dumps(listing("bge-m3:latest")).encode()
+
+
+@pytest.mark.parametrize("declared", [True, False], ids=["declared", "read"])
+def test_a_model_list_of_exactly_the_limit_is_read(declared: bool) -> None:
+    body = TAGS_ANSWER + b" " * (TAGS_LIMIT - len(TAGS_ANSWER))
+    response = (
+        httpx2.Response(200, content=body)
+        if declared
+        else httpx2.Response(200, stream=Trickle([body[:1000], body[1000:]]))
+    )
+    checker(httpx2.MockTransport(lambda _request: response)).check(timeout=1.0)
+
+
+@pytest.mark.parametrize(
+    ("headers", "limit_hit"),
+    [({}, "1,048,577 bytes received"), ({"content-length": "1048577"}, "Content-Length 1,048,577")],
+    ids=["read", "declared"],
+)
+def test_a_model_list_past_the_limit_fails_the_check(
+    headers: dict[str, str], limit_hit: str
+) -> None:
+    body = TAGS_ANSWER + b" " * (TAGS_LIMIT + 1 - len(TAGS_ANSWER))
+    response = httpx2.Response(200, headers=headers, stream=Trickle([body]))
+    assert check_message(response) == f"the answer is larger than 1,048,576 bytes ({limit_hit})"
+
+
+def test_a_compressed_model_list_fails_the_check_unread() -> None:
+    body = Trickle([gzip.compress(TAGS_ANSWER)])
+    response = httpx2.Response(200, headers={"content-encoding": "gzip"}, stream=body)
+    assert check_message(response) == (
+        "the answer is compressed ('gzip'), which the embedder should not do"
+    )
+    assert body.sent == 0
+
+
+def test_a_late_model_list_fails_the_check_unread() -> None:
+    body = Trickle([TAGS_ANSWER])
+
+    def answer_late(_request: httpx2.Request) -> httpx2.Response:
+        time.sleep(0.3)
+        return httpx2.Response(200, stream=body)
+
+    message = check_message(httpx2.MockTransport(answer_late), timeout=0.2)
+    assert message == "no complete answer within 0.2 s"
+    assert body.sent == 0
+
+
+def test_a_dripping_model_list_ends_near_the_deadline() -> None:
+    body = Trickle(itertools.chain([TAGS_ANSWER], itertools.repeat(b" ", 40)), pause=0.05)
+    started = time.monotonic()
+    message = check_message(httpx2.Response(200, stream=body), timeout=0.2)
+    assert message == "no complete answer within 0.2 s"
+    assert time.monotonic() - started < 1.0

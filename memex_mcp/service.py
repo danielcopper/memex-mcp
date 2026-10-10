@@ -46,6 +46,8 @@ NOTICE_UNAVAILABLE = (
 NOTICE_DISABLED = (
     "Semantic search is disabled on this server; these results come from keyword search only."
 )
+# What the check embeds while the last real embedding call has failed.
+CHECK_TEXT = "memex health check"
 
 
 class InvalidRequest(Exception):
@@ -89,6 +91,14 @@ class ListResult(TypedDict):
     area: str
     folder: str
     entries: list[Entry]
+
+
+class Health(TypedDict):
+    """What /healthz answers: fixed words only, since it needs no token."""
+
+    status: Literal["ok"]
+    embeddings: Literal["ok", "failing", "disabled"]
+    repo: Literal["ok", "failing"]
 
 
 def _checked_query(query: str) -> str:
@@ -147,6 +157,10 @@ class Memex:
     embedder: Embedder | None
     clock: Callable[[], float] = time.monotonic
     _embed_retry_at: float = 0.0
+    # Written from worker threads, read by /healthz.
+    _embed_failed: bool = False  # a real embedding call failed, and none has succeeded since
+    _check_failed: bool = False  # a check failed, and nothing has succeeded since
+    _repo_failed: bool = False  # the last refresh round failed
 
     @classmethod
     def from_config(cls, config: Config, embedder: Embedder | None) -> Memex:
@@ -241,7 +255,9 @@ class Memex:
         except EmbeddingError as exc:
             log.warning("query embedding failed, keyword search only: %s", exc)
             self._embed_retry_at = now + self.config.embeddings.retry_after_seconds
+            self._embed_failed = True
             return [], NOTICE_UNAVAILABLE
+        self._embedded()
         return self.index.vector_ranked(vector, areas, pool), None
 
     def read(self, identity: Identity, path: str) -> NoteResult:
@@ -336,7 +352,9 @@ class Memex:
                 )
             except EmbeddingError as exc:
                 log.warning("embedding paused, %d chunks done this round: %s", done, exc)
+                self._embed_failed = True
                 return done
+            self._embedded()
             self.index.store_vectors(
                 [(chunk_id, vector) for (chunk_id, _), vector in zip(batch, vectors, strict=True)]
             )
@@ -344,3 +362,73 @@ class Memex:
         if done:
             log.info("embedded %d chunks", done)
         return done
+
+    # -- health ----------------------------------------------------------
+
+    def health(self) -> Health:
+        embeddings: Literal["ok", "failing", "disabled"]
+        if self.embedder is None:
+            embeddings = "disabled"
+        elif self._embed_failed or self._check_failed:
+            embeddings = "failing"
+        else:
+            embeddings = "ok"
+        repo: Literal["ok", "failing"] = "failing" if self._repo_failed else "ok"
+        return {"status": "ok", "embeddings": embeddings, "repo": repo}
+
+    def _embedded(self) -> None:
+        """An embedding succeeded (a real call or the check's own), which proves more than the
+        model list.
+        """
+        if self._embed_failed or self._check_failed:
+            log.info("the embedder works again")
+        self._embed_failed = False
+        self._check_failed = False
+
+    def check_embeddings(self) -> None:
+        """Check the embedder, once per refresh round.
+
+        Usually this asks the embedder whether it offers the model, which loads no
+        model. While the last real call has failed, that would not show whether
+        embedding works again, so the check embeds a short text instead; only then
+        does a check load the model. A failure is logged when it begins, not every round.
+        """
+        if self.embedder is None:
+            return
+        timeout = self.config.embeddings.query_timeout_seconds
+        if self._embed_failed:
+            try:
+                self.embedder.embed([CHECK_TEXT], timeout=timeout)
+            except EmbeddingError:
+                return  # still failing; the failed call that began it was logged
+            self._embedded()
+            # It answered within a search's timeout, so searches stop skipping the embedder;
+            # a backfill batch, with its longer timeout, does not show that.
+            self._embed_retry_at = 0.0
+            return
+        try:
+            self.embedder.check(timeout=timeout)
+        except EmbeddingError as exc:
+            if not self._check_failed:
+                log.warning("the embedder check failed: %s", exc)
+            self._check_failed = True
+            return
+        if self._check_failed:
+            log.info("the embedder check passes again")
+        self._check_failed = False
+
+    def refresh_round(self, first: bool) -> None:
+        """One round of the refresh loop: fetch and re-index (not in the first round,
+        which follows ``prepare``), check the embedder, fill in vectors.
+
+        The repo counts as failing until a round passes without a failed fetch or
+        fast-forward and without raising.
+        """
+        try:
+            fresh = first or self.refresh()
+            self.check_embeddings()
+            self.backfill()
+        except Exception:
+            self._repo_failed = True
+            raise
+        self._repo_failed = not fresh

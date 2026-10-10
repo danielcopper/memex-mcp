@@ -13,10 +13,11 @@ import anyio
 import httpx2
 import pytest
 
+from memex_mcp.embed import Embedder
 from memex_mcp.rights import ACCESS_DENIED
 from memex_mcp.server import build_app
 from memex_mcp.service import Hit, Memex
-from tests.conftest import MARKER, Origin, make_config
+from tests.conftest import MARKER, FailingEmbedder, FakeEmbedder, Origin, git, make_config
 from tests.test_auth import ISSUER, KEY, FakeJwks, make_verifier, token
 
 BASE = "https://memex.example.org"
@@ -48,19 +49,28 @@ def anyio_backend() -> str:
 
 
 @asynccontextmanager
-async def serve(
-    tmp_path: Path, origin: Origin, run_loop: bool = False
-) -> AsyncGenerator[httpx2.AsyncClient, None]:
-    """The app with its lifespan, entered and left in the test's own task."""
+async def serving(
+    tmp_path: Path, origin: Origin, run_loop: bool = False, embedder: Embedder | None = None
+) -> AsyncGenerator[tuple[httpx2.AsyncClient, Memex], None]:
+    """The app with its lifespan, entered and left in the test's own task, and its service."""
     config = make_config(tmp_path, origin, repo={"fetch_interval_seconds": 1})
-    memex = Memex.from_config(config, embedder=None)
+    memex = Memex.from_config(config, embedder=embedder)
     with FakeJwks((KEY, "k1")) as jwks:
         verifier = make_verifier(jwks, algorithms=("RS256",))
         app = build_app(config, memex, verifier=verifier, run_loop=run_loop)
         async with app.router.lifespan_context(app):
             transport = httpx2.ASGITransport(app=app)
             async with httpx2.AsyncClient(transport=transport, base_url=BASE) as http:
-                yield http
+                yield http, memex
+
+
+@asynccontextmanager
+async def serve(
+    tmp_path: Path, origin: Origin, run_loop: bool = False
+) -> AsyncGenerator[httpx2.AsyncClient, None]:
+    """The app with its lifespan, entered and left in the test's own task."""
+    async with serving(tmp_path, origin, run_loop) as (http, _memex):
+        yield http
 
 
 async def rpc(
@@ -120,7 +130,7 @@ async def test_health_needs_no_token(tmp_path: Path, origin: Origin) -> None:
     async with serve(tmp_path, origin) as client:
         response = await client.get("/healthz")
         assert response.status_code == 200
-        assert response.json() == {"status": "ok"}
+        assert response.json() == {"status": "ok", "embeddings": "disabled", "repo": "ok"}
 
 
 @pytest.mark.anyio
@@ -214,3 +224,59 @@ async def test_areas_tool_answers_the_callers_areas_only(tmp_path: Path, origin:
         outsider = await call(client, token(groups=["household"]), "areas")
         assert outsider["isError"] is True
         assert outsider["content"][0]["text"] == ACCESS_DENIED
+
+
+def break_remote(memex: Memex, origin: Origin) -> None:
+    git(memex.root, "remote", "set-url", "origin", str(origin.bare.parent / "gone.git"))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("embedder", "fetch_fails", "state"),
+    [
+        (None, False, ("disabled", "ok")),
+        (FakeEmbedder, False, ("ok", "ok")),
+        (FailingEmbedder, False, ("failing", "ok")),
+        (FakeEmbedder, True, ("ok", "failing")),
+        (FailingEmbedder, True, ("failing", "failing")),
+        (None, True, ("disabled", "failing")),
+    ],
+    ids=["disabled", "ok", "embeddings-failing", "repo-failing", "both-failing", "disabled-repo"],
+)
+async def test_health_names_each_state_with_status_200(
+    tmp_path: Path,
+    origin: Origin,
+    embedder: type[Embedder] | None,
+    fetch_fails: bool,
+    state: tuple[str, str],
+) -> None:
+    embeddings, repo = state
+    service = None if embedder is None else embedder()
+    async with serving(tmp_path, origin, embedder=service) as (client, memex):
+        if fetch_fails:
+            break_remote(memex, origin)
+        memex.refresh_round(first=False)
+        response = await client.get("/healthz")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", "embeddings": embeddings, "repo": repo}
+        # Monitors match the body as text, so its spelling is part of the answer.
+        assert f'"embeddings":"{embeddings}"' in response.text
+        assert f'"repo":"{repo}"' in response.text
+
+
+@pytest.mark.anyio
+async def test_background_loop_reports_a_failing_embedder_and_fetch(
+    tmp_path: Path, origin: Origin
+) -> None:
+    async with serving(tmp_path, origin, run_loop=True, embedder=FailingEmbedder()) as (
+        client,
+        memex,
+    ):
+        break_remote(memex, origin)
+        wanted = {"status": "ok", "embeddings": "failing", "repo": "failing"}
+        deadline = time.monotonic() + 10
+        body: object = None
+        while time.monotonic() < deadline and body != wanted:
+            body = cast("object", (await client.get("/healthz")).json())
+            await anyio.sleep(0.05)
+        assert body == wanted

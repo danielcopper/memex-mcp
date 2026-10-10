@@ -183,6 +183,10 @@ class FakeEmbedder(Embedder):
             vectors.append(vector)
         return vectors
 
+    @override
+    def check(self, timeout: float) -> None:
+        """Always offers its model."""
+
 
 @dataclass
 class FailingEmbedder(Embedder):
@@ -198,6 +202,10 @@ class FailingEmbedder(Embedder):
     def embed(self, texts: list[str], timeout: float) -> list[list[float]]:
         self.calls += 1
         self.texts.extend(texts)
+        raise EmbeddingError(self.message)
+
+    @override
+    def check(self, timeout: float) -> None:
         raise EmbeddingError(self.message)
 
 

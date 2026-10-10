@@ -176,6 +176,39 @@ Image tags: `latest` and `sha-<short>` follow `main`; each release adds `<versio
 `0.1`). release-please cuts the releases from the Conventional Commits merged to `main`: it bumps the version in
 `pyproject.toml` and writes `CHANGELOG.md`.
 
+### Health
+
+`/healthz` needs no token and answers HTTP 200 whenever the server answers at all, so the container healthcheck marks
+the container unhealthy only when the server stops answering. The body says more, in fixed words only:
+
+```text
+{"status":"ok","embeddings":"ok","repo":"ok"}
+```
+
+| Field        | Value      | Meaning                                                                                                                              |
+| ------------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `status`     | `ok`       | the server answers                                                                                                                   |
+| `embeddings` | `ok`       | the latest embedding call or check succeeded, or none has run yet                                                                    |
+|              | `failing`  | the latest embedding call (a search's query or the vectors of new notes) or check failed                                             |
+|              | `disabled` | `embeddings.enabled` is off                                                                                                          |
+| `repo`       | `ok`       | the last refresh round fetched and fast-forwarded the clone without an error, or only the first round, which does not fetch, has run |
+|              | `failing`  | the last round could not fetch or fast-forward, or broke off with an error; the last state is served                                 |
+
+Every refresh round (`repo.fetch_interval_seconds`) checks the embedder. Usually the check asks Ollama for its model
+list (`GET /api/tags`) and looks for `embeddings.model` there, which loads no model. It compares names as Ollama
+resolves them: `bge-m3`, `library/bge-m3` and `registry.ollama.ai/library/bge-m3` all match `bge-m3:latest`, and a name
+with a tag must match that tag. After an embedding call has failed, the check embeds a short text instead, so that the
+state recovers without anyone searching; only then does a check load the model. A model list that Ollama answers does
+not clear a failed embedding call: Ollama can list the model and still fail to embed. `failing` turns back to `ok` with
+the next embedding call or check that succeeds. A search that embeds, or the check's embedding of a short text, also
+ends the pause in which searches skip the embedder after a failure; vectors for new notes do not, as they are allowed a
+longer timeout than a search. The log says why: a failed check is logged when it begins and its recovery once, not every
+round.
+
+Monitors should match the body text, not the status code: for example, a keyword monitor that alerts unless the body
+contains `"embeddings":"ok"` (on a server with embeddings `disabled`, that one alerts too), and one for `"repo":"ok"`;
+the body has no spaces, as shown above.
+
 ## Development
 
 ```bash
