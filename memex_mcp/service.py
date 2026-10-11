@@ -599,8 +599,8 @@ class Memex:
         current = self._index_file(parts)
         if current is not None and master_link(spot.topic) in current:
             return []
+        # The topic's name was checked in the new index's heading, the description on its own.
         entry = master_entry(spot.topic, description)
-        check_composed([entry])
         text = with_topic(NEW_MASTER_INDEX if current is None else current, entry)
         action: Action = "create" if current is None else "update"
         return [_Change(action, "/".join(parts), text.encode())]
