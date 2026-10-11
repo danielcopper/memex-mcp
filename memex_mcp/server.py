@@ -179,15 +179,20 @@ def build_mcp(
         identity = _caller()
         return await _run(partial(memex.search, identity, query, area, limit))
 
-    @mcp.tool(name="read", annotations=READ_ONLY)
+    read_help = (
+        "Read one memory note in full (Markdown), with its title, whether it is archived, "
+        "its `version` and when it was created and last updated."
+    )
+    if config.write.enabled:
+        read_help += " Pass the version to edit or delete, so they refuse a note changed since."
+
+    @mcp.tool(name="read", annotations=READ_ONLY, description=read_help)
     async def read(
         path: Annotated[
             str,
             Field(description=PATH_HELP),
         ],
     ) -> Mapping[str, object]:
-        """Read one memory note in full (Markdown), with its title, whether it is archived,
-        its `version` (which edit and delete take) and when it was created and last updated."""
         identity = _caller()
         return await _run(partial(memex.read, identity, path))
 
@@ -291,7 +296,10 @@ def _add_write_tools(mcp: FastMCP, config: Config, memex: Memex) -> None:
         new_text: Annotated[str, Field(description="What replaces it.", max_length=longest)],
         version: Annotated[
             str | None,
-            Field(description=VERSION_HELP + " If given, the edit is refused if the note changed."),
+            Field(
+                description=VERSION_HELP
+                + " If given, the edit is refused when the note changed since."
+            ),
         ] = None,
     ) -> Mapping[str, object]:
         """Replace one passage of a note: old_text must occur in it exactly once."""
@@ -320,7 +328,8 @@ def _add_write_tools(mcp: FastMCP, config: Config, memex: Memex) -> None:
         ],
     ) -> Mapping[str, object]:
         """Show the index a new note there would be listed in: its path, whether it exists
-        yet, and its sections. A note in a `daily/` folder has no index."""
+        yet, its sections, and `new_topic`, true when the note would start a new wiki topic
+        and create then needs topic_description. A note in a `daily/` folder has no index."""
         identity = _caller()
         return await _run(partial(memex.index_sections, identity, path))
 

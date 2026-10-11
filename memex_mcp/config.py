@@ -612,11 +612,20 @@ def _check_names(config: Config, origins: _Origins) -> None:
         raise ConfigError(f"{origins.where('server', 'mcp_path')} must be a path such as /mcp")
 
 
+def _check_index_outside_clone(config: Config, origins: _Origins) -> None:
+    # The server removes every untracked file from its clone at start.
+    clone = Path(config.repo.path).resolve()
+    if Path(config.index.path).resolve().is_relative_to(clone):
+        where = origins.where("index", "path")
+        raise ConfigError(f"{where} must lie outside [repo] path, which the server cleans")
+
+
 def _validate(config: Config, origins: _Origins) -> None:
     _check_required(config, origins)
     _check_algorithms(config, origins)
     _check_names(config, origins)
     _check_urls(config, origins)
+    _check_index_outside_clone(config, origins)
     # The server hands the upper-cased name to logging.basicConfig.
     if config.server.log_level.upper() not in logging.getLevelNamesMapping():
         where = origins.where("server", "log_level")

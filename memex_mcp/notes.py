@@ -17,7 +17,13 @@ from pathlib import PurePosixPath
 from typing import Literal
 
 from memex_mcp.markdown import headings
-from memex_mcp.rights import NOTE_SUFFIX, InvalidRequest
+from memex_mcp.rights import (
+    HIDDEN_CATEGORIES,
+    HTML_COMMENT,
+    IMPORT_AT,
+    NOTE_SUFFIX,
+    InvalidRequest,
+)
 
 type Folder = Literal["memory", "wiki"]
 type Action = Literal["create", "update", "append", "delete"]
@@ -32,13 +38,6 @@ MAX_SECTION_CHARS = 100
 SECTION_LEVEL = 2
 # A topic folder's path: area, memory or wiki, topic.
 _TOPIC_DEPTH = 3
-# What no line of an index may hold: control characters, line and paragraph
-# separators, and format characters such as bidi overrides.
-_HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
-HTML_COMMENT = "<!--"
-# Claude Code reads "@path" at the start of a word, in a MEMORY.md it loads,
-# as an import of that file.
-_IMPORT = re.compile(r"(?<!\w)@")
 
 CHANGED_SINCE_READ = "the note changed since you read it; read it again"
 MISSING_TOPIC = (
@@ -210,15 +209,33 @@ def _text_problem(text: str, limit: int) -> str | None:
     an ``@`` starting a word is what Claude Code reads as a file to load
     into the session, from a ``MEMORY.md`` it loads.
     """
-    if len(text) > limit or any(unicodedata.category(c) in _HIDDEN_CATEGORIES for c in text):
+    if len(text) > limit or _has_hidden(text):
         return (
             f"must be one line of at most {limit} characters, without control or format characters"
         )
+    return _markup_problem(text)
+
+
+def _has_hidden(text: str) -> bool:
+    return any(unicodedata.category(c) in HIDDEN_CATEGORIES for c in text)
+
+
+def _markup_problem(text: str) -> str | None:
     if HTML_COMMENT in text:
         return f"must not contain '{HTML_COMMENT}'"
-    if _IMPORT.search(text):
+    if IMPORT_AT.search(text):
         return "must not have '@' at the start of a word, which assistants read as a file to load"
     return None
+
+
+def check_composed(lines: Iterable[str]) -> None:
+    """Refuse index lines and headings, as composed from the path and the texts, that
+    break the index's rules: a second guard behind the checks of each part."""
+    for line in lines:
+        problem = "may not hold control or format characters" if _has_hidden(line) else None
+        problem = problem or _markup_problem(line)
+        if problem is not None:
+            raise InvalidRequest(f"the note cannot be listed in its index: its line {problem}")
 
 
 def checked_section(section: str | None, sections: Sequence[str]) -> str:

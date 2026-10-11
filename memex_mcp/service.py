@@ -36,6 +36,7 @@ from memex_mcp.notes import (
     Action,
     IndexSpot,
     appended,
+    check_composed,
     check_secrets,
     check_size,
     check_version,
@@ -102,8 +103,8 @@ NOT_PUSHED = (
     "the server tries again in every refresh round."
 )
 PUSH_REFUSED = (
-    "Saved in the server's clone, but the git host refused the push; it stays unpushed "
-    "until the server's operator fixes the cause (the server's health reports it)."
+    "Saved in the server's clone, but the git host refused the push; the server tries "
+    "again in every refresh round, and its health reports failing while the refusal lasts."
 )
 WRITING_DISABLED = "writing is disabled on this server"
 NOT_SEARCHABLE = "Saved, but search does not show the change yet; it catches up by itself."
@@ -162,6 +163,8 @@ class SectionsResult(TypedDict):
     index: str | None
     exists: bool
     sections: list[str]
+    # The index is a new wiki topic's: create then also needs topic_description.
+    new_topic: bool
 
 
 class AreasResult(TypedDict):
@@ -513,12 +516,14 @@ class Memex:
         area = self.policy.may_write(identity, parts, "create")
         resolve_write(self.root, parts, area)
         if is_daily(parts):
-            return {"index": None, "exists": False, "sections": []}
-        index_parts, current = self._find_index(index_spot(parts))
+            return {"index": None, "exists": False, "sections": [], "new_topic": False}
+        spot = index_spot(parts)
+        index_parts, current = self._find_index(spot)
         return {
             "index": "/".join(index_parts),
             "exists": current is not None,
             "sections": section_names(current or ""),
+            "new_topic": current is None and spot.folder == "wiki",
         }
 
     def _plan_create(
@@ -544,7 +549,9 @@ class Memex:
             topic = checked_topic(texts.topic)
         check_secrets([content, section, line, topic])
         entry = index_entry(spot.folder, parts, spot.topic, line)
-        text = with_entry(new_index(spot) if current is None else current, section, entry)
+        heading = new_index(spot) if current is None else ""
+        check_composed([entry, heading.rstrip("\n"), f"## {section}"])
+        text = with_entry(heading or current or "", section, entry)
         index_path = "/".join(index_parts)
         changes = [
             note,
@@ -593,6 +600,7 @@ class Memex:
         if current is not None and master_link(spot.topic) in current:
             return []
         entry = master_entry(spot.topic, description)
+        check_composed([entry])
         text = with_topic(NEW_MASTER_INDEX if current is None else current, entry)
         action: Action = "create" if current is None else "update"
         return [_Change(action, "/".join(parts), text.encode())]
@@ -663,6 +671,8 @@ class Memex:
         (they conflict, and no conflict branch could be pushed), the write is
         applied once more on top of them and saved without another push.
         """
+        # A rebase a timeout left behind would make every later step fail.
+        self.repo.abort_rebase()
         attempt = 0
         stuck = False
         while True:
@@ -836,8 +846,8 @@ class Memex:
                 self.repo.reset_hard(f"origin/{self.repo.branch}")
                 self._conflict = True
                 return True
-            if outcome is Push.FAILED:
-                break
+            if outcome is not Push.REJECTED:
+                break  # only a name taken meanwhile is worth the next one
         log.error(
             "the clone's own commits conflict with the remote and could not be saved to a branch"
         )

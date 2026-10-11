@@ -534,3 +534,39 @@ def test_with_writing_off_nothing_is_written_and_the_loop_only_fast_forwards(
         assert conflict_branches(origin) == []
     finally:
         memex.index.close()
+
+
+def test_a_refused_conflict_branch_is_tried_once(
+    memex: Memex, origin: Origin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    branches: list[str] = []
+    real_push = GitRepo.push
+
+    def counted(self: GitRepo, ref: str = "HEAD", branch: str | None = None) -> Push:
+        if branch is not None:
+            branches.append(branch)
+        return real_push(self, ref, branch)
+
+    make_conflict(memex, origin)
+    refuse_pushes(origin)
+    monkeypatch.setattr(GitRepo, "push", counted)
+    assert memex.refresh() is False
+    assert len(branches) == 1
+    assert conflict_branches(origin) == []
+
+
+def test_a_rebase_left_behind_is_ended_before_a_write(
+    memex: Memex, origin: Origin, remote: Remote
+) -> None:
+    break_remote(memex, origin)
+    memex.append(ALICE, "alice/memory/zebra.md", "- saved")
+    writer_commit(origin, "theirs", {"bob/memory/garden.md": "# Garden\n\nbeans\n"})
+    mend_remote(memex, origin)
+    git(memex.root, "fetch", "-q", "origin")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("GIT_SEQUENCE_EDITOR", "sed -i '1i break'")
+        git(memex.root, "rebase", "-q", "-i", "origin/main")
+    result = memex.append(ALICE, "household/memory/wifi.md", "- now")
+    assert result["pushed"] is True
+    assert remote.show("alice/memory/zebra.md").endswith("- saved\n")
+    assert not (memex.root / ".git/rebase-merge").exists()

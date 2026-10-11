@@ -316,6 +316,7 @@ async def test_a_write_over_http_commits_for_the_caller(tmp_path: Path, origin: 
             "index": "household/memory/MEMORY.md",
             "exists": False,
             "sections": [],
+            "new_topic": False,
         }
         result = await call(
             client,
@@ -430,3 +431,17 @@ async def test_with_writing_on_the_instructions_name_the_write_tools(
         instructions = cast("str", initialized.json()["result"]["instructions"])
         assert "`create` a note" in instructions
         assert "a password the user" in instructions
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("write", [True, False], ids=["writing-on", "writing-off"])
+async def test_the_read_description_names_edit_and_delete_only_with_writing_on(
+    tmp_path: Path, origin: Origin, write: bool
+) -> None:
+    async with serving(tmp_path, origin, write=write) as (client, _memex):
+        response = await rpc(client, "tools/list", bearer=token())
+        listed = cast("list[dict[str, object]]", response.json()["result"]["tools"])
+        (read,) = [tool for tool in listed if tool["name"] == "read"]
+        description = cast("str", read["description"])
+        assert "version" in description
+        assert ("edit or delete" in description) is write

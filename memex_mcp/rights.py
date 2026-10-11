@@ -1,4 +1,4 @@
-"""Who may read which area, and which paths inside an area are notes.
+"""Who may read and write which area, and which paths inside an area are notes.
 
 This module is the security core. Every tool asks it for the caller's areas
 and for every path it touches; nothing reads the clone without passing here.
@@ -25,6 +25,7 @@ needed; and no write follows a symlink anywhere on its path.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -39,7 +40,8 @@ WRITABLE_FOLDERS = frozenset({"memory", "wiki"})
 # Loaded by assistants (Claude Code and others) that open the folder: never written through
 # the server. Compared ignoring case, against every segment of a path.
 PROTECTED_NAMES = frozenset({"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"})
-# Changed only by create, which adds a new note's line. Compared like PROTECTED_NAMES.
+# Changed only by create: a new note's line, and the index, a section or the master index
+# line when needed. Compared like PROTECTED_NAMES.
 INDEX_NAMES = frozenset({"MEMORY.md", "_index.md", "_master-index.md"})
 _PROTECTED_FOLDED = frozenset(name.casefold() for name in PROTECTED_NAMES)
 _INDEX_FOLDED = frozenset(name.casefold() for name in INDEX_NAMES)
@@ -134,7 +136,8 @@ class Policy:
         area = check_area(parts[0], areas, NOTE_NOT_FOUND)
         if len(parts) < _MIN_WRITE_SEGMENTS or parts[1] not in WRITABLE_FOLDERS:
             raise AccessDenied(WRITE_OUTSIDE)
-        folded = {part.casefold() for part in parts[2:]}
+        # Trailing dots and spaces dropped, as Windows drops them from file names.
+        folded = {part.rstrip(". ").casefold() for part in parts[2:]}
         if folded & _PROTECTED_FOLDED:
             raise AccessDenied(PROTECTED_FILE)
         if folded & _INDEX_FOLDED:
@@ -164,11 +167,18 @@ INDEX_FILE = (
     "index when needed"
 )
 FORBIDDEN_CHARACTER = "the path contains a forbidden character"
-# What no written path may contain: control characters and line breaks, which would split
-# the commit message, and format characters such as bidi overrides and "<!--", which can
-# hide what follows where the path is shown.
-_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
-_HTML_COMMENT = "<!--"
+WORD_START_AT = (
+    "the path must not have '@' at the start of a word, which assistants read as a file to load"
+)
+# What no written path and no line of an index may contain: control characters and line
+# breaks, which would split a commit message or an index line, and format characters such
+# as bidi overrides, which can hide what follows where the text is shown.
+HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+# Hides what follows in a rendered view.
+HTML_COMMENT = "<!--"
+# Claude Code reads "@path" at the start of a word, in a MEMORY.md it loads, as an import
+# of that file; a path ends up in its index as a link.
+IMPORT_AT = re.compile(r"(?<!\w)@")
 
 
 def split_path(path: str) -> tuple[str, ...]:
@@ -258,15 +268,17 @@ def resolve_folder(root: Path, area: str, folder: str | None, areas: frozenset[s
 
 def split_write_path(path: str) -> tuple[str, ...]:
     """``split_path`` for a note to write: an ``.md`` name, no control or format character,
-    no line break and no ``<!--``.
+    no line break, no ``<!--`` and no ``@`` starting a word.
 
     The path ends up in a commit message, one line per file, and in an index.
     """
     parts = split_path(path)
-    if _HTML_COMMENT in path or any(
-        unicodedata.category(char) in _FORBIDDEN_CATEGORIES for char in path
+    if HTML_COMMENT in path or any(
+        unicodedata.category(char) in HIDDEN_CATEGORIES for char in path
     ):
         raise AccessDenied(FORBIDDEN_CHARACTER)
+    if IMPORT_AT.search(path):
+        raise AccessDenied(WORD_START_AT)
     if not parts or not parts[-1].endswith(NOTE_SUFFIX):
         raise AccessDenied(f"only notes ({NOTE_SUFFIX} files) can be written")
     return parts

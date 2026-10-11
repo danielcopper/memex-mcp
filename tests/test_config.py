@@ -968,3 +968,14 @@ def test_a_remote_is_otherwise_unchecked(tmp_path: Path, remote: str) -> None:
     raw["repo"]["remote"] = remote
     assert build_config(raw, {}).repo.remote == remote
     assert build_config(raw_config(tmp_path), {"MEMEX_REPO_REMOTE": remote}).repo.remote == remote
+
+
+@pytest.mark.parametrize("inside", ["clone/index.sqlite3", "clone", "clone/../clone/x/db"])
+def test_the_index_may_not_lie_inside_the_clone(tmp_path: Path, inside: str) -> None:
+    raw = raw_config(tmp_path)
+    raw["repo"]["path"] = str(tmp_path / "clone")
+    raw["index"]["path"] = str(tmp_path / inside)
+    with pytest.raises(ConfigError, match=r"^\[index\] path must lie outside \[repo\] path"):
+        build_config(raw, {})
+    raw["index"]["path"] = str(tmp_path / "clone-index" / "db.sqlite3")
+    assert build_config(raw, {}).index.path.endswith("db.sqlite3")

@@ -9,6 +9,7 @@ from typing import cast
 
 import pytest
 
+import memex_mcp.rights as rights_module
 from memex_mcp.config import build_config, load_config
 from memex_mcp.notes import CHANGED_SINCE_READ, version_of
 from memex_mcp.rights import (
@@ -17,6 +18,7 @@ from memex_mcp.rights import (
     INDEX_FILE,
     NOTE_NOT_FOUND,
     PROTECTED_FILE,
+    WORD_START_AT,
     WRITE_OUTSIDE,
     AccessDenied,
     Identity,
@@ -605,6 +607,7 @@ def test_index_sections_names_the_index_and_its_sections(topics: Memex) -> None:
         "index": "alice/memory/homelab/MEMORY.md",
         "exists": True,
         "sections": ["Services", "Hardware"],
+        "new_topic": False,
     }
     assert topics.index_sections(ALICE, "alice/memory/homelab/new.md") == expected
     assert topics.index_sections(ALICE, "alice/memory/homelab") == expected
@@ -613,11 +616,16 @@ def test_index_sections_names_the_index_and_its_sections(topics: Memex) -> None:
         "index": "alice/wiki/cooking/_index.md",
         "exists": False,
         "sections": [],
+        "new_topic": True,
     }
+    # An existing wiki topic, and a new memory topic, need no topic description.
+    assert topics.index_sections(ALICE, "alice/wiki/networking")["new_topic"] is False
+    assert topics.index_sections(ALICE, "alice/memory/garden")["new_topic"] is False
     assert topics.index_sections(ALICE, "alice/memory/daily") == {
         "index": None,
         "exists": False,
         "sections": [],
+        "new_topic": False,
     }
 
 
@@ -922,3 +930,57 @@ def test_writing_is_off_unless_switched_on(tmp_path: Path) -> None:
     raw["write"] = {}
     assert build_config(raw, {}).write.enabled is False
     assert load_config(EXAMPLE, env={}).write.enabled is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "alice/memory/topic/x @/etc/passwd y/n.md",
+        "alice/memory/x @big.md y/n.md",
+        "alice/memory/a @b/n.md",
+        "alice/memory/@notes.md",
+        "alice/wiki/@topic/n.md",
+    ],
+)
+def test_an_at_sign_starting_a_word_in_the_path_is_refused(
+    topics: Memex, remote: Remote, path: str
+) -> None:
+    head = remote.head()
+    with pytest.raises(AccessDenied, match=re.escape(WORD_START_AT)):
+        topics.create(ALICE, path, "# N\n", IndexLine("Notes", LINE, "a topic"))
+    assert remote.head() == head
+    with pytest.raises(AccessDenied, match=re.escape(WORD_START_AT)):
+        topics.index_sections(ALICE, path)
+
+
+def test_an_at_sign_inside_a_word_in_the_path_is_fine(memex: Memex) -> None:
+    result = create(memex, ALICE, "alice/memory/mail/alice@example.org.md")
+    assert result["pushed"] is True
+
+
+def test_a_composed_index_line_is_checked_again(
+    topics: Memex, remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # As if the path check let a word-start "@" through.
+    monkeypatch.setattr(rights_module, "IMPORT_AT", re.compile(r"(?!)"))
+    head = remote.head()
+    for path in ("alice/memory/homelab/x @y/n.md", "alice/memory/x @big.md y/n.md"):
+        with pytest.raises(InvalidRequest, match="cannot be listed in its index"):
+            create(topics, ALICE, path)
+    assert remote.head() == head
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "alice/memory/CLAUDE.md./x.md",
+        "alice/memory/CLAUDE.md /x.md",
+        "alice/memory/agents.md ./x.md",
+        "alice/memory/MEMORY.md../x.md",
+        "alice/wiki/_index.md /x.md",
+    ],
+)
+def test_trailing_dots_and_spaces_do_not_hide_a_protected_name(memex: Memex, path: str) -> None:
+    with pytest.raises(AccessDenied):
+        create(memex, ALICE, path)
+    assert not (memex.root / path).exists()
