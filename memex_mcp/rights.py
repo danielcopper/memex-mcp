@@ -19,8 +19,9 @@ they read, and only below ``<area>/memory/`` or ``<area>/wiki/``; no write
 names ``CLAUDE.md``, ``CLAUDE.local.md`` or ``AGENTS.md`` in any letter case,
 as a file or as a folder; no write names an index file (``MEMORY.md``,
 ``_index.md``, ``_master-index.md``) either, since indexes change only
-through ``create``, which adds a new note's line and creates the index when
-needed; and no write follows a symlink anywhere on its path.
+through ``create``, which adds a new note's line and creates the index, a
+section or the master index line when needed; and no write follows a symlink
+anywhere on its path.
 """
 
 from __future__ import annotations

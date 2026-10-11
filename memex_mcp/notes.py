@@ -232,10 +232,12 @@ def check_composed(lines: Iterable[str]) -> None:
     """Refuse index lines and headings, as composed from the path and the texts, that
     break the index's rules: a second guard behind the checks of each part."""
     for line in lines:
-        problem = "may not hold control or format characters" if _has_hidden(line) else None
+        problem = "must not hold control or format characters" if _has_hidden(line) else None
         problem = problem or _markup_problem(line)
         if problem is not None:
-            raise InvalidRequest(f"the note cannot be listed in its index: its line {problem}")
+            raise InvalidRequest(
+                f"the note cannot be listed in its index: a line or heading it needs {problem}"
+            )
 
 
 def checked_section(section: str | None, sections: Sequence[str]) -> str:

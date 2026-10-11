@@ -61,6 +61,8 @@ fetch_interval_seconds = 60
 git_timeout_seconds = 60
 
 [index]
+# Outside repo.path: at start the server removes every untracked file git does
+# not ignore from its clone.
 path = "/data/index/memex.sqlite3"
 # Greater than 0, at most 1.
 archive_factor = 0.5

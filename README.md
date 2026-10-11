@@ -15,14 +15,14 @@ follow.
 **Clone and index.** The server owns a clone of the memex repository. At start it clones it if needed and builds a
 SQLite search index of the configured areas (the users' areas and the household area; other top-level folders are not
 read); the index is a cache on a volume, never committed, and rebuilt from scratch when it is missing, its schema
-version differs, or the set of configured areas changed. Since the clone is the server's alone, it drops at start
-whatever was never committed (a crash between writing a note and committing it), and it ends a rebase left behind at the
-start of each refresh round and before each write. Every 60 seconds a background loop runs `git fetch`, brings the clone
-onto the remote (`git merge --ff-only`, or, with writing on, a rebase of commits the server could not push yet, which it
-then pushes) and re-indexes exactly the paths that changed between the old and the new HEAD. A failed fetch is logged
-and the last state keeps serving. The index also keeps each note's dates from git: `created` is the author date of the
-first commit touching it, `updated` the commit date of the last one, so a change rebased onto newer commits counts from
-when it landed.
+version differs, or the set of configured areas changed. Since the clone is the server's alone, the server drops at
+start whatever was never committed (a crash between writing a note and committing it), and it ends a rebase left behind
+before each write and before a refresh round moves the clone. Every 60 seconds a background loop runs `git fetch`,
+brings the clone onto the remote (`git merge --ff-only`, or, with writing on, a rebase of commits the server could not
+push yet, which it then pushes) and re-indexes exactly the paths that changed between the old and the new HEAD. A failed
+fetch is logged and the last state keeps serving. The index also keeps each note's dates from git: `created` is the
+author date of the first commit touching it, `updated` the commit date of the last one, so a change rebased onto newer
+commits counts from when it landed.
 
 **Search.** Notes are split into chunks by heading and then by paragraph. Each chunk is indexed twice: in its area's own
 FTS5 table (bm25 ranking) and, once the embedder has answered, as a vector (Ollama, model `bge-m3`) compared with
@@ -35,8 +35,8 @@ runs on keywords alone, says so in the result (`semantic: false` plus a `notice`
 instead of waiting on every query. Vectors for new or changed chunks are filled in by the background loop, so an
 embedder that is off does not hold up the keyword index.
 
-**Writing.** With writing off (`write.enabled`, the default), the server offers no write tools and names none in its
-instructions, and a read-only credential suffices. With writing on, each write is one commit in the server's clone,
+**Writing.** With writing off (`write.enabled = false`, the default), the server offers no write tools and names none in
+its instructions, and a read-only credential suffices. With writing on, each write is one commit in the server's clone,
 pushed within the call: the caller is the commit's author (their username, and an e-mail address from
 `write.author_email`), the server its committer (`memex-mcp`). The message names the action and the path, never the
 content, in the format [docs/memex-format.md](docs/memex-format.md#commits) describes. The answer says whether the push
@@ -57,9 +57,9 @@ contains a private key block or an access token with a well-known prefix (`ghp_`
 `glpat-` and similar) is refused, naming the kind but never the value, while passwords written in prose are allowed. A
 new note's line goes into its topic's index in the same commit, and the first note of a new wiki topic brings the
 topic's line for the master index. Index lines, section names, topic descriptions and paths hold no control or format
-characters, no `<!--` and no `@` at the start of a word (which Claude Code would follow as a file to load); every index
-line and heading is checked again as composed, before it is written. [docs/memex-format.md](docs/memex-format.md)
-describes indexes, sections and line formats.
+characters, no `<!--` and no `@` at the start of a word (which Claude Code would follow as a file to load); a new note's
+index line and every heading it adds are checked again as composed, before they are written.
+[docs/memex-format.md](docs/memex-format.md) describes indexes, sections and line formats.
 
 **Authentication.** The server is an OAuth 2.1 resource server; Authentik is the authorization server. Clients find
 Authentik through the protected resource metadata (RFC 9728) at `/.well-known/oauth-protected-resource` and obtain
@@ -94,7 +94,7 @@ The write tools and `index_sections` exist only with `write.enabled` on.
 | `read(path)`                                                          | returns the full note: `path`, `area`, `title`, `archived`, `content`, `version` (git's blob id of the content), `created`, `updated`                                                                                                                                                                                                                            |
 | `list(area, folder=None)`                                             | returns the notes and folders of one folder: `name`, `path`, `type` (`note` or `folder`)                                                                                                                                                                                                                                                                         |
 | `areas()`                                                             | returns the caller's own areas: `areas` (the own area, plus `household` for members of the household group)                                                                                                                                                                                                                                                      |
-| `index_sections(path)`                                                | returns the index a new note at `path` (a note's path or a folder) would be listed in, its topic's: `index` (its path, `null` for a daily note), `exists`, `sections`                                                                                                                                                                                            |
+| `index_sections(path)`                                                | returns the index a new note at `path` (a note's path or a folder) would be listed in, its topic's: `index` (its path, `null` for a daily note), `exists`, `sections`, `new_topic` (true when the note would start a new wiki topic, so `create` needs `topic_description`)                                                                                      |
 | `create(path, content, index_section, index_line, topic_description)` | creates a note, refusing an existing path, and adds `index_line` (a description of at most 300 characters) at the end of `index_section` in its topic's index; the first note of a new wiki topic also needs `topic_description` for the master index; a note under a `daily/` folder takes no index line and ignores the rest; a wiki note needs a topic folder |
 | `append(path, text)`                                                  | adds `text` at the end of an existing note, on a line of its own                                                                                                                                                                                                                                                                                                 |
 | `edit(path, old_text, new_text, version=None)`                        | replaces `old_text`, which must occur exactly once; with `version`, refuses a note that changed since it was read                                                                                                                                                                                                                                                |
@@ -145,7 +145,7 @@ that names no setting, other than `MEMEX_CONFIG`, also stops the start.
 | `repo.path`                                                | required                                   | the server's clone                                                        |
 | `repo.remote`                                              | none                                       | cloned from here when `repo.path` holds no clone                          |
 | `repo.branch`, `repo.fetch_interval_seconds`               | `main`, `60`                               | what to follow and how often                                              |
-| `index.path`                                               | required                                   | the SQLite index (a cache)                                                |
+| `index.path`                                               | required                                   | the SQLite index (a cache); must lie outside `repo.path`                  |
 | `index.archive_factor`                                     | `0.5`                                      | score factor for notes under `archive/`                                   |
 | `index.snippet_chars`, `index.chunk_chars`                 | `300`, `1500`                              | snippet and chunk size                                                    |
 | `embeddings.enabled`, `embeddings.url`, `embeddings.model` | `true`, `http://localhost:11434`, `bge-m3` | the Ollama embedder                                                       |

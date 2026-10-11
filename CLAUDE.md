@@ -26,10 +26,10 @@ CI runs the same on Python 3.12 (the floor) and 3.14, and builds the container i
   reads only the FTS5 tables of the caller's areas, filters vectors by area in SQL (`memex_mcp/index.py`), and checks
   the area again in the service.
 - **What the caller cannot see answers like what does not exist**: same exception (`NotFound`), same fixed message,
-  refused before the clone is touched. Error messages never name an area, a configured value or a server path; the one
-  exception is the bounds the tool schema publishes anyway (`limit`, the longest text), which pydantic names when a call
-  exceeds them. Messages that depend only on the caller's input (absolute path, `..`, hidden segment) may be specific. A
-  caller without any access gets one fixed text (`ACCESS_DENIED`), whichever setting is missing.
+  refused before the clone is touched. Error messages never name an area, a configured value or a server path; the
+  bounds the tool schema publishes anyway (`limit`, the longest text) are the one exception: pydantic names them when a
+  call exceeds them. Messages that depend only on the caller's input (absolute path, `..`, hidden segment) may be
+  specific. A caller without any access gets one fixed text (`ACCESS_DENIED`), whichever setting is missing.
 - **A caller's ranking depends only on the areas they may read.** Each area has its own FTS5 table, because bm25's word
   statistics are per table; rankings from different areas are fused by rank, never compared by score.
   `test_ranking_does_not_depend_on_foreign_areas` holds this.

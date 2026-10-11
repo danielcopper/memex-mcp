@@ -613,7 +613,7 @@ def _check_names(config: Config, origins: _Origins) -> None:
 
 
 def _check_index_outside_clone(config: Config, origins: _Origins) -> None:
-    # The server removes every untracked file from its clone at start.
+    # At start the server removes every untracked file git does not ignore from its clone.
     clone = Path(config.repo.path).resolve()
     if Path(config.index.path).resolve().is_relative_to(clone):
         where = origins.where("index", "path")
