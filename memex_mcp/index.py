@@ -14,6 +14,9 @@ caller's ranking depends only on the areas they may read.
 Text is indexed synchronously; vectors are filled in afterwards by
 ``missing_vectors``/``store_vectors``, so an unreachable embedder never holds
 up the keyword index.
+
+``note_dates`` keeps each note's dates from git (first and last commit), set
+whenever its path is indexed, so a search reads them without asking git.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ import os
 import re
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import cast
@@ -38,7 +41,7 @@ log = logging.getLogger(__name__)
 
 # Bump whenever the tables or what goes into them change; a database with a
 # different version is discarded and rebuilt.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 ARCHIVE_SEGMENT = "archive"
 # A note's path has at least two segments: its area, then its file name.
@@ -63,6 +66,7 @@ CREATE TABLE chunk_vectors (
     chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
     embedding BLOB NOT NULL
 );
+CREATE TABLE note_dates (path TEXT PRIMARY KEY, created TEXT NOT NULL, updated TEXT NOT NULL);
 """
 
 # The columns of every area's FTS5 table, and their bm25 weights in that order.
@@ -79,6 +83,8 @@ class ChunkRow:
     heading: str
     body: str
     archived: bool
+    created: str | None
+    updated: str | None
 
 
 def is_archived(relative: str) -> bool:
@@ -386,6 +392,46 @@ class Index:
                 raise
             return indexed
 
+    def set_dates(
+        self, dates: Mapping[str, tuple[str, str]], paths: Iterable[str] | None = None
+    ) -> None:
+        """Store (created, updated) for the indexed notes among ``paths``, or among all
+        notes when ``paths`` is None; a path without dates or without chunks has no row.
+        """
+        with self._lock:
+            self.conn.execute("BEGIN")
+            try:
+                if paths is None:
+                    self.conn.execute("DELETE FROM note_dates")
+                    wanted = [path for path in dates if is_utf8(path)]
+                else:
+                    # A name that is not UTF-8 is never indexed, so it has no row either.
+                    wanted = [path for path in dict.fromkeys(paths) if is_utf8(path)]
+                    self.conn.executemany(
+                        "DELETE FROM note_dates WHERE path = ?", [(path,) for path in wanted]
+                    )
+                self.conn.executemany(
+                    (
+                        "INSERT INTO note_dates (path, created, updated) SELECT ?, ?, ? "
+                        "WHERE EXISTS (SELECT 1 FROM chunks WHERE path = ?)"
+                    ),
+                    [(path, *dates[path], path) for path in wanted if path in dates],
+                )
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+
+    def dates_of(self, path: str) -> tuple[str, str] | None:
+        """A note's (created, updated), or None while the index has none for it."""
+        with self._lock:
+            return cast(
+                "tuple[str, str] | None",
+                self.conn.execute(
+                    "SELECT created, updated FROM note_dates WHERE path = ?", (path,)
+                ).fetchone(),
+            )
+
     def missing_vectors(self, limit: int) -> list[tuple[int, str]]:
         """Chunks without a vector yet, with the text to embed."""
         with self._lock:
@@ -470,17 +516,20 @@ class Index:
         marks = ",".join("?" * len(wanted))
         with self._lock:
             rows = cast(
-                "list[tuple[int, str, str, str, str, str, int]]",
+                "list[tuple[int, str, str, str, str, str, int, str | None, str | None]]",
                 self.conn.execute(
                     (
-                        f"SELECT id, path, area, title, heading, body, archived FROM chunks "  # noqa: S608 - only placeholders are interpolated
-                        f"WHERE id IN ({marks})"
+                        f"SELECT c.id, c.path, c.area, c.title, c.heading, c.body, c.archived, "  # noqa: S608 - only placeholders are interpolated
+                        f"d.created, d.updated FROM chunks c "
+                        f"LEFT JOIN note_dates d ON d.path = c.path WHERE c.id IN ({marks})"
                     ),
                     wanted,
                 ).fetchall(),
             )
         return {
-            row[0]: ChunkRow(row[0], row[1], row[2], row[3], row[4], row[5], bool(row[6]))
+            row[0]: ChunkRow(
+                row[0], row[1], row[2], row[3], row[4], row[5], bool(row[6]), row[7], row[8]
+            )
             for row in rows
         }
 

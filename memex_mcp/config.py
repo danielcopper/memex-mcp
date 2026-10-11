@@ -130,6 +130,18 @@ class EmbeddingsConfig:
 
 
 @dataclass(frozen=True)
+class WriteConfig:
+    # Off, the server offers no write tools and only fast-forwards its clone.
+    enabled: bool = False
+    # A note may hold at most this many bytes after a write through the server.
+    max_note_bytes: int = 65536
+    # The e-mail address of a write's commit author; "{username}" becomes the
+    # caller's username, with every character other than letters, digits and
+    # . _ + - replaced by "-".
+    author_email: str = "{username}@memex.invalid"
+
+
+@dataclass(frozen=True)
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
@@ -137,6 +149,7 @@ class Config:
     repo: RepoConfig = field(default_factory=RepoConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
     embeddings: EmbeddingsConfig = field(default_factory=EmbeddingsConfig)
+    write: WriteConfig = field(default_factory=WriteConfig)
     # username (as Authentik sends it in `preferred_username`) -> area directory
     users: Mapping[str, str] = field(default_factory=dict[str, str])
 
@@ -186,6 +199,7 @@ _BOUNDS: Mapping[tuple[str, str], _Bound] = {
     ("embeddings", "index_timeout_seconds"): _Bound(MIN_TIMEOUT_SECONDS, high=MAX_SECONDS),
     ("embeddings", "retry_after_seconds"): _Bound(0, high=MAX_SECONDS),
     ("embeddings", "batch_size"): _Bound(1, high=MAX_WHOLE),
+    ("write", "max_note_bytes"): _Bound(1, high=MAX_WHOLE),
 }
 
 # What int() reads as a decimal whole number; it refuses one only past its
@@ -438,6 +452,7 @@ def build_config(
         repo=_section("repo", RepoConfig(), raw, origins),
         index=_section("index", IndexConfig(), raw, origins),
         embeddings=_section("embeddings", EmbeddingsConfig(), raw, origins),
+        write=_section("write", WriteConfig(), raw, origins),
         users=_users(raw, origins),
     )
     _validate(config, origins)
@@ -545,6 +560,7 @@ def _check_required(config: Config, origins: _Origins) -> None:
         ("repo", "path", config.repo.path),
         ("repo", "branch", config.repo.branch),
         ("index", "path", config.index.path),
+        ("write", "author_email", config.write.author_email),
     ]
     if config.embeddings.enabled:
         required += [
@@ -581,6 +597,7 @@ def _check_names(config: Config, origins: _Origins) -> None:
         ("repo", "branch", config.repo.branch),
         ("repo", "path", config.repo.path),
         ("index", "path", config.index.path),
+        ("write", "author_email", config.write.author_email),
     ]
     if config.embeddings.enabled:
         names.append(("embeddings", "model", config.embeddings.model))
@@ -595,11 +612,20 @@ def _check_names(config: Config, origins: _Origins) -> None:
         raise ConfigError(f"{origins.where('server', 'mcp_path')} must be a path such as /mcp")
 
 
+def _check_index_outside_clone(config: Config, origins: _Origins) -> None:
+    # At start the server removes every untracked file git does not ignore from its clone.
+    clone = Path(config.repo.path).resolve()
+    if Path(config.index.path).resolve().is_relative_to(clone):
+        where = origins.where("index", "path")
+        raise ConfigError(f"{where} must lie outside [repo] path, which the server cleans")
+
+
 def _validate(config: Config, origins: _Origins) -> None:
     _check_required(config, origins)
     _check_algorithms(config, origins)
     _check_names(config, origins)
     _check_urls(config, origins)
+    _check_index_outside_clone(config, origins)
     # The server hands the upper-cased name to logging.basicConfig.
     if config.server.log_level.upper() not in logging.getLevelNamesMapping():
         where = origins.where("server", "log_level")

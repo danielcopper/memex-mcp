@@ -50,10 +50,16 @@ def anyio_backend() -> str:
 
 @asynccontextmanager
 async def serving(
-    tmp_path: Path, origin: Origin, run_loop: bool = False, embedder: Embedder | None = None
+    tmp_path: Path,
+    origin: Origin,
+    run_loop: bool = False,
+    embedder: Embedder | None = None,
+    write: bool = True,
 ) -> AsyncGenerator[tuple[httpx2.AsyncClient, Memex], None]:
     """The app with its lifespan, entered and left in the test's own task, and its service."""
-    config = make_config(tmp_path, origin, repo={"fetch_interval_seconds": 1})
+    config = make_config(
+        tmp_path, origin, repo={"fetch_interval_seconds": 1}, write={"enabled": write}
+    )
     memex = Memex.from_config(config, embedder=embedder)
     with FakeJwks((KEY, "k1")) as jwks:
         verifier = make_verifier(jwks, algorithms=("RS256",))
@@ -133,14 +139,33 @@ async def test_health_needs_no_token(tmp_path: Path, origin: Origin) -> None:
         assert response.json() == {"status": "ok", "embeddings": "disabled", "repo": "ok"}
 
 
+# Each tool's hints: read-only, destructive, idempotent (None where a read-only tool has none).
+TOOL_HINTS: dict[str, tuple[bool, bool, bool | None]] = {
+    "search": (True, False, None),
+    "read": (True, False, None),
+    "list": (True, False, None),
+    "areas": (True, False, None),
+    "index_sections": (True, False, None),
+    "create": (False, False, False),
+    "append": (False, False, False),
+    "edit": (False, True, False),
+    "delete": (False, True, False),
+}
+
+
 @pytest.mark.anyio
-async def test_tools_are_listed_read_only(tmp_path: Path, origin: Origin) -> None:
+async def test_tools_are_listed_with_their_hints(tmp_path: Path, origin: Origin) -> None:
     async with serve(tmp_path, origin) as client:
         response = await rpc(client, "tools/list", bearer=token())
         listed = cast("list[ListedTool]", response.json()["result"]["tools"])
         tools = {tool["name"]: tool for tool in listed}
-        assert set(tools) == {"search", "read", "list", "areas"}
-        assert all(tool["annotations"]["readOnlyHint"] is True for tool in tools.values())
+        assert set(tools) == set(TOOL_HINTS)
+        for name, (read_only, destructive, idempotent) in TOOL_HINTS.items():
+            hints = tools[name]["annotations"]
+            assert hints["readOnlyHint"] is read_only, name
+            assert hints["destructiveHint"] is destructive, name
+            assert hints.get("idempotentHint") is idempotent, name
+            assert hints["openWorldHint"] is False, name
 
 
 @pytest.mark.anyio
@@ -280,3 +305,143 @@ async def test_background_loop_reports_a_failing_embedder_and_fetch(
             body = cast("object", (await client.get("/healthz")).json())
             await anyio.sleep(0.05)
         assert body == wanted
+
+
+@pytest.mark.anyio
+async def test_a_write_over_http_commits_for_the_caller(tmp_path: Path, origin: Origin) -> None:
+    async with serving(tmp_path, origin) as (client, memex):
+        bob = token(preferred_username="bob")
+        sections = await call(client, bob, "index_sections", path="household/memory")
+        assert sections["structuredContent"] == {
+            "index": "household/memory/MEMORY.md",
+            "exists": False,
+            "sections": [],
+            "new_topic": False,
+        }
+        result = await call(
+            client,
+            bob,
+            "create",
+            path="household/memory/bins.md",
+            content="# Bins\n\nTuesday\n",
+            index_section="House",
+            index_line="bin days",
+        )
+        assert result["isError"] is False
+        written = result["structuredContent"]
+        assert written["pushed"] is True
+        assert written["commit"] == git(origin.bare, "rev-parse", "main").strip()
+        assert git(origin.bare, "log", "-1", "--format=%an %s", "main").strip() == (
+            "bob memex-mcp: 2 files in household/memory"
+        )
+        read = await call(client, bob, "read", path="household/memory/bins.md")
+        assert read["structuredContent"]["version"] == written["version"]
+        assert memex.health()["repo"] == "ok"
+
+
+@pytest.mark.anyio
+async def test_foreign_and_missing_notes_refuse_writes_alike_over_http(
+    tmp_path: Path, origin: Origin
+) -> None:
+    async with serve(tmp_path, origin) as client:
+        alice = token()
+        head = git(origin.bare, "rev-parse", "main")
+        answers = [
+            await call(client, alice, "append", path=path, text="more")
+            for path in ("bob/memory/zebra.md", "bob/memory/no-such-note.md")
+        ]
+        answers.append(
+            await call(
+                client,
+                alice,
+                "create",
+                path="bob/memory/zebra.md",
+                content="# x\n",
+                index_section="S",
+                index_line="l",
+            )
+        )
+        assert all(answer == answers[0] for answer in answers)
+        assert answers[0]["isError"] is True
+        assert answers[0]["content"][0]["text"] == "no such note"
+        assert git(origin.bare, "rev-parse", "main") == head
+
+
+@pytest.mark.anyio
+async def test_health_reads_conflict_while_a_conflict_branch_exists(
+    tmp_path: Path, origin: Origin
+) -> None:
+    async with serving(tmp_path, origin) as (client, memex):
+        git(origin.bare, "branch", "conflict/memex-mcp-2026-01-01", "main")
+        memex.refresh_round(first=False)
+        response = await client.get("/healthz")
+        assert response.status_code == 200
+        assert '"repo":"conflict"' in response.text
+
+
+@pytest.mark.anyio
+async def test_a_text_longer_than_a_note_may_be_is_refused_before_the_service(
+    tmp_path: Path, origin: Origin
+) -> None:
+    async with serving(tmp_path, origin) as (client, memex):
+        too_long = "x" * (memex.config.write.max_note_bytes + 1)
+        result = await call(client, token(), "append", path="alice/memory/zebra.md", text=too_long)
+        assert result["isError"] is True
+        assert "at most 65536 characters" in result["content"][0]["text"]
+
+
+@pytest.mark.anyio
+async def test_with_writing_off_only_the_read_tools_are_offered(
+    tmp_path: Path, origin: Origin
+) -> None:
+    async with serving(tmp_path, origin, write=False) as (client, _memex):
+        response = await rpc(client, "tools/list", bearer=token())
+        listed = cast("list[ListedTool]", response.json()["result"]["tools"])
+        assert {tool["name"] for tool in listed} == {"search", "read", "list", "areas"}
+        initialized = await rpc(
+            client,
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"},
+            },
+            bearer=token(),
+        )
+        instructions = cast("str", initialized.json()["result"]["instructions"])
+        assert "search" in instructions
+        assert "create" not in instructions
+
+
+@pytest.mark.anyio
+async def test_with_writing_on_the_instructions_name_the_write_tools(
+    tmp_path: Path, origin: Origin
+) -> None:
+    async with serve(tmp_path, origin) as client:
+        initialized = await rpc(
+            client,
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"},
+            },
+            bearer=token(),
+        )
+        instructions = cast("str", initialized.json()["result"]["instructions"])
+        assert "`create` a note" in instructions
+        assert "a password the user" in instructions
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("write", [True, False], ids=["writing-on", "writing-off"])
+async def test_the_read_description_names_edit_and_delete_only_with_writing_on(
+    tmp_path: Path, origin: Origin, write: bool
+) -> None:
+    async with serving(tmp_path, origin, write=write) as (client, _memex):
+        response = await rpc(client, "tools/list", bearer=token())
+        listed = cast("list[dict[str, object]]", response.json()["result"]["tools"])
+        (read,) = [tool for tool in listed if tool["name"] == "read"]
+        description = cast("str", read["description"])
+        assert "version" in description
+        assert ("edit or delete" in description) is write

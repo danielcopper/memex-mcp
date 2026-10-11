@@ -156,7 +156,11 @@ def _world(base: Path, foreign: dict[str, str], embedder: Embedder | None) -> st
     }
     write_notes(work, {**own, **foreign})
     git(work, "add", "-A")
-    git(work, "commit", "-q", "-m", "world")
+    # The same dates in both worlds: hits carry each note's dates from git.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("GIT_AUTHOR_DATE", "2026-01-01T12:00:00+00:00")
+        patch.setenv("GIT_COMMITTER_DATE", "2026-01-01T12:00:00+00:00")
+        git(work, "commit", "-q", "-m", "world")
     git(work, "push", "-q", "origin", "main")
     memex = Memex.from_config(make_config(base, Origin(bare, work)), embedder=embedder)
     memex.prepare()
