@@ -28,7 +28,7 @@ Two folder names have a meaning wherever they appear:
 - `archive/` holds historical notes. Search ranks them lower and marks them `archived`.
 
 Notes are Markdown files ending in `.md`, in UTF-8. Hidden files and folders (`.git`, `.obsidian`) are not notes. A
-note's title is its first level-one heading (`# DNS`) outside code blocks, else its file name without `.md`.
+note's title is its first level-one heading (`# DNS`) outside fenced code blocks, else its file name without `.md`.
 
 ```text
 alice/
@@ -97,9 +97,7 @@ description: The resolver, its upstreams and the local zone
 ```
 
 memex-mcp neither reads nor checks it. Dates are not part of the frontmatter: memex-mcp takes them from git and returns
-them with every search hit and `read`. `created` is the author date of the first commit touching the note, when it was
-written; `updated` is the commit date of the last one, when the last change landed, so a change that was written earlier
-and rebased onto newer commits counts as late as it landed.
+them with every search hit and `read`, as the README defines them under [Clone and index](../README.md#architecture).
 
 Planned, not yet in use: `supersedes:` and `superseded-by:`, which will link a note to a revised version written as a
 new note.
@@ -107,7 +105,8 @@ new note.
 ## Protected files
 
 - `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`, in any folder, are read by assistants (Claude Code and others) that
-  open the folder. memex-mcp never creates, changes or deletes them, nor a folder of such a name, in any letter case.
+  open the folder. memex-mcp never creates, changes or deletes them, nor a folder of such a name, in any letter case and
+  also with trailing dots or spaces.
 - Index files (`MEMORY.md`, `_index.md`, `_master-index.md`) change only through creating a note, which adds the note's
   line and, when needed, creates the index, a section or the topic's master index line; and through cleanup. memex-mcp
   treats these names like the protected ones: in any letter case, and as folder names too.
@@ -129,8 +128,8 @@ One commit per change. The message is English, with no type or scope:
   ```
 
 The writer is the program that commits: `memex-mcp` for the server, the machine's name for a clone (`laptop`). The
-actions are `create`, `update`, `append` and `delete`. The commit's author is who stands behind the change; the
-committer is the writer. A message never carries a note's content.
+actions are `create`, `update`, `append` and `delete`. The commit's author is who stands behind the change; memex-mcp
+commits as itself. A message never carries a note's content.
 
 ## Sync and conflicts
 
@@ -147,18 +146,18 @@ tells a person. Resolving the conflict and then deleting the branch is up to a p
 A client with a clone must follow three rules: the commit message format, the conflict branches, and a new note's index
 line in the commit that creates the note. Every other rule holds only for writes through memex-mcp.
 
-| Rule                                                                      | memex-mcp, for writes through it | A client with a clone |
-| ------------------------------------------------------------------------- | -------------------------------- | --------------------- |
-| Commit messages, conflict branches                                        | done                             | must follow           |
-| A new note's index line, in the same commit                               | enforced                         | must follow           |
-| Write only in your own areas                                              | enforced                         | —                     |
-| Write only `.md` notes below `<area>/memory/` or `<area>/wiki/`           | enforced                         | —                     |
-| No hidden files, no symlinks                                              | enforced                         | —                     |
-| Protected files and index files                                           | enforced                         | —                     |
-| New wiki notes only in a topic folder                                     | enforced                         | —                     |
-| A note at most 64 KiB after a write (`write.max_note_bytes`)              | enforced                         | —                     |
-| No machine secrets (private keys, access tokens) in written text or paths | enforced                         | —                     |
-| Index texts without control or format characters, `<!--` or a leading `@` | enforced                         | —                     |
+| Rule                                                                                   | memex-mcp, for writes through it | A client with a clone |
+| -------------------------------------------------------------------------------------- | -------------------------------- | --------------------- |
+| Commit messages, conflict branches                                                     | done                             | must follow           |
+| A new note's index line, in the same commit                                            | enforced                         | must follow           |
+| Write only in your own areas                                                           | enforced                         | —                     |
+| Write only `.md` notes below `<area>/memory/` or `<area>/wiki/`                        | enforced                         | —                     |
+| No hidden files, no symlinks                                                           | enforced                         | —                     |
+| Protected files and index files                                                        | enforced                         | —                     |
+| New wiki notes only in a topic folder                                                  | enforced                         | —                     |
+| A note at most 64 KiB after a write (`write.max_note_bytes`)                           | enforced                         | —                     |
+| No machine secrets (private keys, access tokens) in written text or paths              | enforced                         | —                     |
+| Index texts and paths without control or format characters, `<!--` or a word-start `@` | enforced                         | —                     |
 
-git has no rights per folder: whoever has a clone can read and write every area. The rights hold only for access through
-memex-mcp.
+git has no rights per folder: whoever has a clone can read every area, and whoever may push can write every area. The
+rights hold only for access through memex-mcp.

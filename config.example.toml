@@ -92,8 +92,8 @@ batch_size = 32
 
 [write]
 # Off (the default), the server offers no write tools and only fast-forwards
-# its clone, so it runs with a read-only credential. On, it needs a remote it
-# may push to.
+# its clone, so a read-only credential suffices. On, it needs a remote it may
+# push to.
 enabled = false
 # A note may hold at most this many bytes after a write through the server;
 # a write that would make it larger is refused. Whole number, 1 to 2147483647.

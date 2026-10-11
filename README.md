@@ -15,13 +15,14 @@ follow.
 **Clone and index.** The server owns a clone of the memex repository. At start it clones it if needed and builds a
 SQLite search index of the configured areas (the users' areas and the household area; other top-level folders are not
 read); the index is a cache on a volume, never committed, and rebuilt from scratch when it is missing, its schema
-version differs, or the set of configured areas changed. The server owns its clone: at start it drops whatever was never
-committed (a crash between writing a note and committing it), and before each round it ends a rebase left behind. Every
-60 seconds a background loop runs `git fetch`, brings the clone onto the remote (`git merge --ff-only`, or, with writing
-on, a rebase of commits the server could not push yet, which it then pushes) and re-indexes exactly the paths that
-changed between the old and the new HEAD. A failed fetch is logged and the last state keeps serving. The index also
-keeps each note's dates from git: `created` is the author date of the first commit touching it, `updated` the commit
-date of the last one, so a change rebased onto newer commits counts from when it landed.
+version differs, or the set of configured areas changed. Since the clone is the server's alone, it drops at start
+whatever was never committed (a crash between writing a note and committing it), and it ends a rebase left behind at the
+start of each refresh round and before each write. Every 60 seconds a background loop runs `git fetch`, brings the clone
+onto the remote (`git merge --ff-only`, or, with writing on, a rebase of commits the server could not push yet, which it
+then pushes) and re-indexes exactly the paths that changed between the old and the new HEAD. A failed fetch is logged
+and the last state keeps serving. The index also keeps each note's dates from git: `created` is the author date of the
+first commit touching it, `updated` the commit date of the last one, so a change rebased onto newer commits counts from
+when it landed.
 
 **Search.** Notes are split into chunks by heading and then by paragraph. Each chunk is indexed twice: in its area's own
 FTS5 table (bm25 ranking) and, once the embedder has answered, as a vector (Ollama, model `bge-m3`) compared with
@@ -34,31 +35,31 @@ runs on keywords alone, says so in the result (`semantic: false` plus a `notice`
 instead of waiting on every query. Vectors for new or changed chunks are filled in by the background loop, so an
 embedder that is off does not hold up the keyword index.
 
-**Writing.** Writing is off unless `write.enabled` is set: then the server offers no write tools, names none in its
-instructions, and runs with a credential that can only read. With writing on, each write is one commit in the server's
-clone, pushed within the call: the caller is the commit's author (their username, and an e-mail address from
+**Writing.** With writing off (`write.enabled`, the default), the server offers no write tools and names none in its
+instructions, and a read-only credential suffices. With writing on, each write is one commit in the server's clone,
+pushed within the call: the caller is the commit's author (their username, and an e-mail address from
 `write.author_email`), the server its committer (`memex-mcp`). The message names the action and the path, never the
-content (`memex-mcp: append alice/memory/daily/2026-10-10.md`). The answer says whether the push went through. When the
-remote has commits the clone lacks, the server fetches and applies the write again on that state, up to three times; a
-write that no longer fits (the passage to replace is gone, the note changed since it was read, the path is taken) fails
-with that reason. When the remote cannot be reached, the commit stays in the clone, the answer says it is saved but not
-yet pushed, and every refresh round tries to push it again. When the remote refuses the push for good (a hook, a
-protected branch, no write access), the answer says so, `/healthz` reports `failing` and the commit stays in the clone
-until an operator fixes the cause. If saved commits conflict with the remote when they are rebased, the server pushes
-them to a branch `conflict/memex-mcp-<date>`, logs an error, follows the remote again and reports `conflict` on
-`/healthz` until that branch is deleted; should even that push fail, a write waiting behind them is saved without
-further tries. One lock serialises the writes and the loop's rebasing and pushing; the loop's fetch runs outside it.
-After the commit the server re-indexes the touched notes, so search shows the change at once; should that fail, the
-write still counts and search catches up in the next round.
+content, in the format [docs/memex-format.md](docs/memex-format.md#commits) describes. The answer says whether the push
+went through. When the remote has commits the clone lacks, the server fetches and applies the write again on that state,
+up to three times; a write that no longer fits (the passage to replace is gone, the note changed since it was read, the
+path is taken) fails with that reason. When the remote cannot be reached, the commit stays in the clone, the answer says
+it is saved but not yet pushed, and every refresh round tries to push it again. When the remote refuses the push (a
+hook, a protected branch, missing rights), the answer says so and the commit stays in the clone; every refresh round
+tries again, and `/healthz` reports `failing` while the refusal lasts. If saved commits conflict with the remote when
+they are rebased, the server pushes them to a branch `conflict/memex-mcp-<date>`, logs an error, follows the remote
+again and reports `conflict` on `/healthz` until that branch is deleted; should even that push fail, a write waiting
+behind them is saved without further tries. One lock serialises the writes and the loop's rebasing and pushing; the
+loop's fetch runs outside it. After the commit the server re-indexes the touched notes, so search shows the change at
+once; should that fail, the write still counts and search catches up in the next round.
 
-Guards on every write: a note may hold at most `write.max_note_bytes` (64 KiB) afterwards; new text and the path that
-contain a private key block or an access token with a well-known prefix (`ghp_`, `github_pat_`, `sk-`, `AKIA`, `xoxb-`,
-`glpat-` and similar) are refused, naming the kind but never the value, while passwords written in prose are allowed;
-`edit` needs its passage to occur exactly once and `delete` needs the version `read` returned. A new note's line goes
-into its topic's index in the same commit, and the first note of a new wiki topic brings the topic's line for the master
-index. Index lines, section names and topic descriptions are one line without control or format characters, `<!--` or an
-`@` at the start of a word (which Claude Code would follow as a file to load).
-[docs/memex-format.md](docs/memex-format.md) describes indexes, sections and line formats.
+Guards on every write: a note may hold at most `write.max_note_bytes` (64 KiB) afterwards; new text or a path that
+contains a private key block or an access token with a well-known prefix (`ghp_`, `github_pat_`, `sk-`, `AKIA`, `xoxb-`,
+`glpat-` and similar) is refused, naming the kind but never the value, while passwords written in prose are allowed. A
+new note's line goes into its topic's index in the same commit, and the first note of a new wiki topic brings the
+topic's line for the master index. Index lines, section names, topic descriptions and paths hold no control or format
+characters, no `<!--` and no `@` at the start of a word (which Claude Code would follow as a file to load); every index
+line and heading is checked again as composed, before it is written. [docs/memex-format.md](docs/memex-format.md)
+describes indexes, sections and line formats.
 
 **Authentication.** The server is an OAuth 2.1 resource server; Authentik is the authorization server. Clients find
 Authentik through the protected resource metadata (RFC 9728) at `/.well-known/oauth-protected-resource` and obtain
@@ -85,7 +86,7 @@ does not reveal what other people have.
 
 **Tools.**
 
-The write tools exist only with `write.enabled` on.
+The write tools and `index_sections` exist only with `write.enabled` on.
 
 | Tool                                                                  | Does                                                                                                                                                                                                                                                                                                                                                             |
 | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -116,8 +117,8 @@ for the note.
 - With writing on, the server pushes with a credential that can write the whole repository; the per-area write rights
   hold only for writes through the server. A commit's author is what the server sets from the verified token, but git
   itself does not verify authors: anyone else who can push can name any author.
-- The checks for secrets catch only unambiguous machine secrets in the text a write adds. Whatever a note holds is
-  readable by everyone with the repository, as above.
+- The checks for secrets catch only unambiguous machine secrets in the text a write adds and in its path. Whatever a
+  note holds is readable by everyone with the repository, as above.
 - Operators who need people separated at the git level would use one repository per person plus one shared repository.
   Version 1 does not support that; it is planned for a later version.
 
