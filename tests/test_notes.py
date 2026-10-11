@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from memex_mcp.notes import (
     MAX_INDEX_LINE_CHARS,
     appended,
+    check_composed,
     check_secrets,
     checked_line,
     checked_section,
@@ -331,3 +333,18 @@ def test_the_master_line_goes_to_the_end_of_the_first_section() -> None:
         "# Wiki\n\n## Topics\n\n- [[wiki/a/_index|a]] — a\n- new\n\n## Other\n\n- x\n"
     )
     assert with_topic("# Wiki\n\n- [[a]]\n", "- new") == "# Wiki\n\n- [[a]]\n- new\n"
+
+
+@pytest.mark.parametrize(
+    ("line", "problem"),
+    [
+        ("- [a\u202eb.md](a\u202eb.md) — x", "control or format characters"),
+        ("# topic\x0cname", "control or format characters"),
+        ("- [x <!-- y.md](<x <!-- y.md>) — x", "'<!--'"),
+        ("- [x @y/n.md](<x @y/n.md>) — x", "'@' at the start of a word"),
+    ],
+)
+def test_a_composed_index_line_is_checked(line: str, problem: str) -> None:
+    with pytest.raises(InvalidRequest, match=re.escape(problem)):
+        check_composed(["- fine", line])
+    check_composed(["- [a.md](a.md) — mail alice@example.org", "# topic", "## Section"])
