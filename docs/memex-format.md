@@ -129,7 +129,10 @@ One commit per change. The message is English, with no type or scope:
 
 The writer is the program that commits: `memex-mcp` for the server, the machine's name for a clone (`laptop`). The
 actions are `create`, `update`, `append` and `delete`. The commit's author is who stands behind the change; memex-mcp
-commits as itself. A message never carries a note's content.
+commits as itself. A message never carries a note's content. Since version 0.4.0, memex-mcp ends each message with a git
+trailer naming the OAuth client the write came through, for example `Memex-Client: memex-openwebui`, so that the writes
+from one front end, such as a chat, can be found and reverted: `git log --format='%(trailers:key=Memex-Client)'` lists
+the client of every commit that carries one.
 
 ## Sync and conflicts
 

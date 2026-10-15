@@ -9,7 +9,14 @@ from typing import cast
 
 import pytest
 
-from memex_mcp.config import SHOWN_CHARS, Config, ConfigError, build_config, load_config
+from memex_mcp.config import (
+    SHOWN_CHARS,
+    Config,
+    ConfigError,
+    IssuerConfig,
+    build_config,
+    load_config,
+)
 from tests.conftest import raw_config
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "config.example.toml"
@@ -712,6 +719,8 @@ def test_every_setting_reads_its_environment_variable(tmp_path: Path) -> None:
         if section == "users":
             continue
         for key, value in values.items():
+            if (section, key) == ("auth", "extra_issuers"):
+                continue  # in the file only, like [users]
             env = {_env(section, key): _as_env_text(value)}
             assert _settings(build_config(raw_config(tmp_path), env)) == built
 
@@ -979,3 +988,236 @@ def test_the_index_may_not_lie_inside_the_clone(tmp_path: Path, inside: str) -> 
         build_config(raw, {})
     raw["index"]["path"] = str(tmp_path / "clone-index" / "db.sqlite3")
     assert build_config(raw, {}).index.path.endswith("db.sqlite3")
+
+
+OPENWEBUI = "https://auth.example.org/application/o/memex-openwebui/"
+EXTRA_ENTRY: dict[str, object] = {
+    "issuer": OPENWEBUI,
+    "client_ids": ["memex-openwebui"],
+    "algorithms": ["ES256"],
+}
+
+
+def _with_extras(tmp_path: Path, *entries: object) -> dict[str, dict[str, object]]:
+    raw = raw_config(tmp_path)
+    raw["auth"]["extra_issuers"] = list(entries)
+    return raw
+
+
+def test_a_config_without_extra_issuers_has_none(tmp_path: Path) -> None:
+    assert build_config(raw_config(tmp_path), {}).auth.extra_issuers == ()
+    assert load_config(EXAMPLE, env={}).auth.extra_issuers == ()
+
+
+def test_extra_issuers_are_read_in_file_order(tmp_path: Path) -> None:
+    second = {**EXTRA_ENTRY, "issuer": "https://auth.example.org/application/o/other/"}
+    second["jwks_url"] = "https://keys.example.org/other.json"
+    config = build_config(_with_extras(tmp_path, EXTRA_ENTRY, second), {})
+    assert config.auth.extra_issuers == (
+        IssuerConfig(OPENWEBUI, OPENWEBUI + "jwks/", ("memex-openwebui",), ("ES256",)),
+        IssuerConfig(
+            "https://auth.example.org/application/o/other/",
+            "https://keys.example.org/other.json",
+            ("memex-openwebui",),
+            ("ES256",),
+        ),
+    )
+    # [auth] itself is untouched.
+    assert config.auth.issuer == "https://auth.example.org/application/o/memex/"
+    assert config.auth.client_ids == ("claude-code",)
+
+
+ENTRY = r"\[\[auth\.extra_issuers\]\] entry 1"
+
+EXTRA_REFUSALS: dict[str, tuple[dict[str, object], str]] = {
+    "unknown key": (
+        {**EXTRA_ENTRY, "leeway_seconds": 5},
+        rf"^{ENTRY} has unknown keys: 'leeway_seconds'$",
+    ),
+    "no issuer": (
+        {"client_ids": ["c"], "algorithms": ["ES256"]},
+        rf"^{ENTRY} lacks required keys: issuer$",
+    ),
+    "no client_ids nor algorithms": (
+        {"issuer": OPENWEBUI},
+        rf"^{ENTRY} lacks required keys: client_ids, algorithms$",
+    ),
+    "issuer not a string": ({**EXTRA_ENTRY, "issuer": 5}, rf"^{ENTRY} issuer must be a string$"),
+    "issuer empty": ({**EXTRA_ENTRY, "issuer": ""}, rf"^{ENTRY} issuer must not be empty$"),
+    "issuer http": (
+        {**EXTRA_ENTRY, "issuer": "http://auth.example.org/application/o/x/"},
+        rf"^{ENTRY} issuer uses http, needs https",
+    ),
+    "issuer with a credential": (
+        {**EXTRA_ENTRY, "issuer": "https://u:s3cret@auth.example.org/application/o/x/"},
+        rf"^{ENTRY} issuer must not carry a user or password$",
+    ),
+    "jwks_url http": (
+        {**EXTRA_ENTRY, "jwks_url": "http://auth.example.org/jwks/"},
+        rf"^{ENTRY} jwks_url uses http, needs https",
+    ),
+    "jwks_url with a credential": (
+        {**EXTRA_ENTRY, "jwks_url": "https://u:s3cret@auth.example.org/jwks/"},
+        rf"^{ENTRY} jwks_url must not carry a user or password$",
+    ),
+    "jwks_url empty": ({**EXTRA_ENTRY, "jwks_url": ""}, rf"^{ENTRY} jwks_url must not be empty$"),
+    "jwks_url not a string": (
+        {**EXTRA_ENTRY, "jwks_url": ["https://auth.example.org/jwks/"]},
+        rf"^{ENTRY} jwks_url must be a string$",
+    ),
+    "client id with a line break": (
+        {**EXTRA_ENTRY, "client_ids": ["memex-openwebui\nMemex-Client: s3cret"]},
+        rf"^{ENTRY} client_ids contains whitespace or control characters$",
+    ),
+    "client id with a space": (
+        {**EXTRA_ENTRY, "client_ids": ["memex openwebui"]},
+        rf"^{ENTRY} client_ids contains whitespace or control characters$",
+    ),
+    "client_ids a string": (
+        {**EXTRA_ENTRY, "client_ids": "memex-openwebui"},
+        rf"^{ENTRY} client_ids must be a list of strings$",
+    ),
+    "client_ids with a number": (
+        {**EXTRA_ENTRY, "client_ids": ["memex-openwebui", 7]},
+        rf"^{ENTRY} client_ids must be a list of strings$",
+    ),
+    "client_ids empty": (
+        {**EXTRA_ENTRY, "client_ids": []},
+        rf"^{ENTRY} client_ids must neither be empty nor hold an empty string$",
+    ),
+    "client_ids with an empty string": (
+        {**EXTRA_ENTRY, "client_ids": [""]},
+        rf"^{ENTRY} client_ids must neither be empty nor hold an empty string$",
+    ),
+    "algorithms empty": (
+        {**EXTRA_ENTRY, "algorithms": []},
+        rf"^{ENTRY} algorithms must neither be empty nor hold an empty string$",
+    ),
+    "algorithm HS256": (
+        {**EXTRA_ENTRY, "algorithms": ["ES256", "HS256"]},
+        rf"^{ENTRY} algorithms has 'HS256', not one of {ALLOWED_ALGORITHMS}$",
+    ),
+    "algorithm none": (
+        {**EXTRA_ENTRY, "algorithms": ["none"]},
+        rf"^{ENTRY} algorithms has 'none', not one of {ALLOWED_ALGORITHMS}$",
+    ),
+}
+
+
+@pytest.mark.parametrize(("entry", "pattern"), EXTRA_REFUSALS.values(), ids=list(EXTRA_REFUSALS))
+def test_a_bad_extra_issuer_entry_is_refused(
+    tmp_path: Path, entry: dict[str, object], pattern: str
+) -> None:
+    with pytest.raises(ConfigError, match=pattern) as refused:
+        build_config(_with_extras(tmp_path, entry), {})
+    assert "s3cret" not in str(refused.value)
+
+
+def test_a_refused_entry_names_the_file_and_its_number(tmp_path: Path) -> None:
+    raw = _with_extras(tmp_path, EXTRA_ENTRY, {**EXTRA_ENTRY, "issuer": 5})
+    with pytest.raises(ConfigError) as refused:
+        build_config(raw, {}, "/etc/memex.toml")
+    assert str(refused.value) == (
+        "[[auth.extra_issuers]] entry 2 issuer in /etc/memex.toml must be a string"
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [EXTRA_ENTRY, [EXTRA_ENTRY, 5], ["x"], OPENWEBUI, 5],
+    ids=["a table", "a list with a number", "a list of strings", "a string", "a number"],
+)
+def test_extra_issuers_must_be_an_array_of_tables(tmp_path: Path, value: object) -> None:
+    raw = raw_config(tmp_path)
+    raw["auth"]["extra_issuers"] = value
+    pattern = (
+        r"^\[auth\] extra_issuers must be an array of tables, written \[\[auth\.extra_issuers\]\]$"
+    )
+    with pytest.raises(ConfigError, match=pattern):
+        build_config(raw, {})
+
+
+def test_an_extra_issuer_may_not_repeat_the_auth_issuer(tmp_path: Path) -> None:
+    raw = _with_extras(tmp_path, {**EXTRA_ENTRY, "issuer": raw_config(tmp_path)["auth"]["issuer"]})
+    assert (
+        _refusal(raw) == "[[auth.extra_issuers]] entry 1 issuer repeats the issuer of [auth] issuer"
+    )
+    # Nor the one an environment variable sets.
+    env = {"MEMEX_AUTH_ISSUER": OPENWEBUI}
+    assert _refusal(_with_extras(tmp_path, EXTRA_ENTRY), env) == (
+        "[[auth.extra_issuers]] entry 1 issuer repeats the issuer of "
+        + "[auth] issuer from MEMEX_AUTH_ISSUER"
+    )
+
+
+def test_two_extra_issuers_may_not_name_the_same_issuer(tmp_path: Path) -> None:
+    raw = _with_extras(tmp_path, EXTRA_ENTRY, {**EXTRA_ENTRY, "client_ids": ["other"]})
+    assert _refusal(raw) == (
+        "[[auth.extra_issuers]] entry 2 issuer repeats the issuer of [[auth.extra_issuers]] entry 1"
+    )
+
+
+@pytest.mark.parametrize("name", ["MEMEX_AUTH_EXTRA_ISSUERS", "MEMEX_AUTH_EXTRA_ISSUERS_ISSUER"])
+def test_extra_issuers_come_from_the_file_only(tmp_path: Path, name: str) -> None:
+    message = _refusal(raw_config(tmp_path), {name: OPENWEBUI})
+    assert message == f"[[auth.extra_issuers]] lives in the file only, not in '{name}'"
+    assert "example" not in message
+
+
+def test_the_example_entry_for_an_extra_issuer_loads(tmp_path: Path) -> None:
+    """The commented [[auth.extra_issuers]] example in config.example.toml, uncommented."""
+    text = EXAMPLE.read_text(encoding="utf-8")
+    start = text.index("# [[auth.extra_issuers]]")
+    block = text[start : text.index("\n\n", start)]
+    uncommented = "\n".join(line.removeprefix("# ") for line in block.splitlines())
+    path = tmp_path / "config.toml"
+    path.write_text(text.replace(block, uncommented), encoding="utf-8")
+    [extra] = load_config(path, env={}).auth.extra_issuers
+    assert extra == IssuerConfig(OPENWEBUI, OPENWEBUI + "jwks/", ("memex-openwebui",), ("ES256",))
+
+
+@pytest.mark.parametrize(
+    "client_id", ["claude-code\nMemex-Client: s3cret", "claude code", "claude-code\t", "s3cret\x00"]
+)
+def test_an_auth_client_id_with_whitespace_or_control_characters_is_refused(
+    tmp_path: Path, client_id: str
+) -> None:
+    raw = raw_config(tmp_path)
+    raw["auth"]["client_ids"] = ["other", client_id]
+    message = _refusal(raw)
+    assert message == "[auth] client_ids contains whitespace or control characters"
+    assert "s3cret" not in message
+
+
+def test_an_auth_client_id_from_the_environment_is_checked_too(tmp_path: Path) -> None:
+    # The variable's list drops the blanks around each id, not those inside one.
+    env = {"MEMEX_AUTH_CLIENT_IDS": "other, claude-code\nMemex-Client: s3cret "}
+    message = _refusal(raw_config(tmp_path), env)
+    assert message == (
+        "[auth] client_ids from MEMEX_AUTH_CLIENT_IDS contains whitespace or control characters"
+    )
+    assert "s3cret" not in message
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (OPENWEBUI, OPENWEBUI.rstrip("/")),
+        (OPENWEBUI.rstrip("/"), OPENWEBUI),
+    ],
+    ids=["second without the slash", "second with the slash"],
+)
+def test_issuers_apart_only_by_a_trailing_slash_are_the_same(
+    tmp_path: Path, first: str, second: str
+) -> None:
+    raw = _with_extras(
+        tmp_path, {**EXTRA_ENTRY, "issuer": first}, {**EXTRA_ENTRY, "issuer": second}
+    )
+    assert _refusal(raw) == (
+        "[[auth.extra_issuers]] entry 2 issuer repeats the issuer of [[auth.extra_issuers]] entry 1"
+    )
+    auth_issuer = cast("str", raw_config(tmp_path)["auth"]["issuer"])
+    raw = _with_extras(tmp_path, {**EXTRA_ENTRY, "issuer": auth_issuer.rstrip("/")})
+    assert _refusal(raw) == (
+        "[[auth.extra_issuers]] entry 1 issuer repeats the issuer of [auth] issuer"
+    )

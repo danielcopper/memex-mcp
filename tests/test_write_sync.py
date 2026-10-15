@@ -374,7 +374,7 @@ def test_a_path_that_looks_like_pathspec_magic_names_only_itself(
     memex = Memex.from_config(make_config(tmp_path, origin, users={"eve": area}), None)
     memex.prepare()
     try:
-        eve = Identity("eve", frozenset({"memex"}))
+        eve = Identity("eve", frozenset({"memex"}), "claude-code")
         result = memex.create(eve, f"{area}/memory/daily/d.md", "# D\n\nmarmoset\n")
         assert result["pushed"] is True
         assert git(origin.bare, "show", f"main:{area}/memory/daily/d.md") == "# D\n\nmarmoset\n"

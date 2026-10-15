@@ -215,7 +215,7 @@ def test_no_access_gets_the_one_fixed_text(memex: Memex, tool: str) -> None:
 
 
 def test_household_needs_the_group_to_write_even_for_the_owner(memex: Memex) -> None:
-    alice_alone = Identity("alice", frozenset({"memex"}))
+    alice_alone = Identity("alice", frozenset({"memex"}), "claude-code")
     with pytest.raises(NotFound):
         create(memex, alice_alone, "household/memory/new.md")
     assert create(memex, alice_alone, "alice/memory/new.md")["pushed"] is True
@@ -268,7 +268,7 @@ def test_an_area_directory_that_is_a_symlink_is_refused(tmp_path: Path, origin: 
     memex.prepare()
     try:
         (memex.root / "evil").symlink_to("bob")
-        eve = Identity("eve", frozenset({"memex"}))
+        eve = Identity("eve", frozenset({"memex"}), "claude-code")
         with pytest.raises(NotFound):
             create(memex, eve, "evil/memory/new.md")
         assert not (memex.root / "bob/memory/new.md").exists()
@@ -476,7 +476,8 @@ def test_create_adds_the_line_at_the_end_of_an_existing_section(
     assert remote.log_of("%B").strip() == (
         "memex-mcp: 2 files in alice/memory/homelab\n\n"
         "create alice/memory/homelab/vpn.md\n"
-        "update alice/memory/homelab/MEMORY.md"
+        "update alice/memory/homelab/MEMORY.md\n\n"
+        "Memex-Client: claude-code"
     )
 
 
@@ -553,7 +554,8 @@ def test_a_new_wiki_topic_gets_its_index_and_a_master_index_line(
         "memex-mcp: 3 files in alice/wiki\n\n"
         "create alice/wiki/cooking/bread.md\n"
         "create alice/wiki/cooking/_index.md\n"
-        "update alice/wiki/_master-index.md"
+        "update alice/wiki/_master-index.md\n\n"
+        "Memex-Client: claude-code"
     )
 
 
@@ -646,8 +648,26 @@ def test_a_write_is_committed_by_the_service_for_the_caller(memex: Memex, remote
     memex.append(ALICE, "alice/memory/zebra.md", "line")
     assert remote.log_of("%an|%ae|%cn|%ce|%B").strip() == (
         "alice|alice@memex.invalid|memex-mcp|memex-mcp@memex.invalid|"
-        "memex-mcp: append alice/memory/zebra.md"
+        "memex-mcp: append alice/memory/zebra.md\n\n"
+        "Memex-Client: claude-code"
     )
+
+
+def test_every_write_commit_names_its_client_as_a_git_trailer(
+    topics: Memex, remote: Remote
+) -> None:
+    via_chat = Identity(ALICE.username, ALICE.groups, "memex-openwebui")
+    topics.create(via_chat, "alice/memory/homelab/vpn.md", "# VPN\n", IndexLine("Services", "VPN"))
+    topics.append(ALICE, "alice/memory/homelab/vpn.md", "more")
+    trailers = remote.log_of("%(trailers:key=Memex-Client,valueonly)", count=2)
+    assert trailers.split() == ["claude-code", "memex-openwebui"]
+    # git reads the client as the only trailer, not the file lines above it; the author stays
+    # the caller.
+    every_trailer = "%an|%(trailers:only,unfold,separator=%x2C)"
+    assert remote.log_of(every_trailer, count=2).split("\n") == [
+        "alice|Memex-Client: claude-code",
+        "alice|Memex-Client: memex-openwebui",
+    ]
 
 
 def test_the_author_address_comes_from_the_configured_pattern(
@@ -657,7 +677,7 @@ def test_the_author_address_comes_from_the_configured_pattern(
     memex = Memex.from_config(config, None)
     memex.prepare()
     try:
-        odd = Identity("ali ce<x>", frozenset({"memex", "household"}))
+        odd = Identity("ali ce<x>", frozenset({"memex", "household"}), "claude-code")
         memex.append(odd, "household/memory/wifi.md", "line")
         assert remote.log_of("%an|%ae") == "ali cex|ali-ce-x-@users.example.org"
     finally:

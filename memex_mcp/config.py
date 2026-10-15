@@ -3,7 +3,8 @@
 The file holds everything; an environment variable ``MEMEX_<SECTION>_<KEY>``
 overrides a scalar or list value of that section (lists comma-separated), so
 secrets and URLs need not live in the file. The identity-to-area mapping
-(``[users]``) lives in the file only.
+(``[users]``) and the further token issuers (``[[auth.extra_issuers]]``) live
+in the file only.
 """
 
 from __future__ import annotations
@@ -59,6 +60,24 @@ class ServerConfig:
 
 
 @dataclass(frozen=True)
+class IssuerConfig:
+    """A provider whose tokens are accepted, with its own client ids and algorithms.
+
+    [auth] describes one and each [[auth.extra_issuers]] entry another; all
+    share [auth]'s leeway, refetch wait and timeout, and the protected resource
+    metadata lists the entries after [auth]'s issuer.
+    """
+
+    # Exactly as the provider puts it into `iss`.
+    issuer: str
+    # As given, or "<issuer>jwks/" when the entry names none.
+    jwks_url: str
+    # The client ids whose tokens from this issuer are accepted (`aud` and `azp`).
+    client_ids: tuple[str, ...]
+    algorithms: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class AuthConfig:
     # The issuer exactly as Authentik puts it into `iss`, e.g.
     # https://auth.example.org/application/o/memex/ (per-provider issuer mode).
@@ -77,6 +96,8 @@ class AuthConfig:
     # for this long, nor sooner than timeout_seconds.
     jwks_min_refetch_seconds: int = 60
     timeout_seconds: float = 5.0
+    # Further providers, from [[auth.extra_issuers]] in the file only.
+    extra_issuers: tuple[IssuerConfig, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -155,11 +176,25 @@ class Config:
 
     @property
     def jwks_url(self) -> str:
-        return self.auth.jwks_url or self.auth.issuer.rstrip("/") + "/jwks/"
+        return self.auth.jwks_url or _derived_jwks_url(self.auth.issuer)
+
+
+def _derived_jwks_url(issuer: str) -> str:
+    """Authentik's per-application JWKS endpoint below ``issuer``."""
+    return issuer.rstrip("/") + "/jwks/"
 
 
 # The top-level tables a config file may have: one per field of Config.
 _SECTIONS = frozenset(f.name for f in fields(Config))
+
+# Settings of a section that live in the file only: no environment variable
+# sets them, and the generic section reading leaves them to their own parser.
+_FILE_ONLY = frozenset({("auth", "extra_issuers")})
+
+EXTRA_ISSUERS = "[[auth.extra_issuers]]"
+# The keys of one [[auth.extra_issuers]] entry, the required ones first.
+_EXTRA_REQUIRED = ("issuer", "client_ids", "algorithms")
+_EXTRA_KEYS = frozenset({*_EXTRA_REQUIRED, "jwks_url"})
 
 
 @dataclass(frozen=True)
@@ -232,6 +267,7 @@ def _setting_env_names() -> frozenset[str]:
         _env_name(section, f.name)
         for section in _SECTIONS - {"users"}
         for f in fields(cast("DataclassInstance", getattr(defaults, section)))
+        if (section, f.name) not in _FILE_ONLY
     )
 
 
@@ -385,6 +421,8 @@ def _section[S: DataclassInstance](
         raise ConfigError(f"{where} has unknown keys: {', '.join(map(_key, sorted(unknown)))}")
     values: dict[str, object] = {}
     for f in fields(defaults):
+        if (name, f.name) in _FILE_ONLY:
+            continue
         default = cast("object", getattr(defaults, f.name))
         env_name = _env_name(name, f.name)
         where = origins.where(name, f.name)
@@ -422,12 +460,83 @@ def _users(raw: Mapping[str, object], origins: _Origins) -> dict[str, str]:
     return users
 
 
+def _entry_strings(where: str, value: object) -> tuple[str, ...]:
+    """A list of strings from an [[auth.extra_issuers]] entry; never a comma-separated string."""
+    if isinstance(value, list):
+        items = cast("list[object]", value)
+        strings = [item for item in items if isinstance(item, str)]
+        if len(strings) == len(items):
+            return tuple(strings)
+    raise ConfigError(f"{where} must be a list of strings")
+
+
+def _entry_url(where: str, value: object) -> str:
+    # Never shown: a URL may carry a credential.
+    if not isinstance(value, str):
+        raise ConfigError(f"{where} must be a string")
+    if not value:
+        raise ConfigError(f"{where} must not be empty")
+    problem = _url_problem(value, https=True)
+    if problem:
+        raise ConfigError(f"{where} {problem}")
+    return value
+
+
+def _extra_issuer(name: str, entry: dict[str, object], origins: _Origins) -> IssuerConfig:
+    unknown = set(entry) - _EXTRA_KEYS
+    if unknown:
+        where = origins.in_file(name)
+        raise ConfigError(f"{where} has unknown keys: {', '.join(map(_key, sorted(unknown)))}")
+    missing = [key for key in _EXTRA_REQUIRED if key not in entry]
+    if missing:
+        raise ConfigError(f"{origins.in_file(name)} lacks required keys: {', '.join(missing)}")
+    issuer = _entry_url(origins.in_file(f"{name} issuer"), entry["issuer"])
+    jwks_url = (
+        _entry_url(origins.in_file(f"{name} jwks_url"), entry["jwks_url"])
+        if "jwks_url" in entry
+        else _derived_jwks_url(issuer)
+    )
+    lists: dict[str, tuple[str, ...]] = {}
+    for key in ("client_ids", "algorithms"):
+        where = origins.in_file(f"{name} {key}")
+        lists[key] = _entry_strings(where, entry[key])
+        if not lists[key] or not all(lists[key]):
+            raise ConfigError(f"{where} must neither be empty nor hold an empty string")
+    _refuse_space_or_control(origins.in_file(f"{name} client_ids"), lists["client_ids"])
+    _refuse_symmetric(origins.in_file(f"{name} algorithms"), lists["algorithms"])
+    return IssuerConfig(issuer, jwks_url, lists["client_ids"], lists["algorithms"])
+
+
+def _extra_issuers(raw: Mapping[str, object], origins: _Origins) -> tuple[IssuerConfig, ...]:
+    """The [[auth.extra_issuers]] entries in file order.
+
+    Called once _section has read [auth], which refuses an [auth] that is not a table.
+    """
+    auth = cast("dict[str, object]", raw.get("auth", {}))
+    value = auth.get("extra_issuers", [])
+    if not isinstance(value, list) or not all(
+        isinstance(entry, dict) for entry in cast("list[object]", value)
+    ):
+        where = origins.in_file("[auth] extra_issuers")
+        raise ConfigError(f"{where} must be an array of tables, written {EXTRA_ISSUERS}")
+    entries = cast("list[dict[str, object]]", value)
+    return tuple(
+        _extra_issuer(f"{EXTRA_ISSUERS} entry {number}", entry, origins)
+        for number, entry in enumerate(entries, start=1)
+    )
+
+
 def _check_env_names(env: Mapping[str, str]) -> None:
     """Refuse a MEMEX_ variable no setting reads, naming it but never its value."""
     unknown = sorted(name for name in env if name.startswith(ENV_PREFIX) and name not in _ENV_NAMES)
     users = [name for name in unknown if name.startswith(_env_name("users", ""))]
     if users:
         raise ConfigError(f"[users] lives in the file only, not in {', '.join(map(_key, users))}")
+    extra = [name for name in unknown if name.startswith(_env_name("auth", "extra_issuers"))]
+    if extra:
+        raise ConfigError(
+            f"{EXTRA_ISSUERS} lives in the file only, not in {', '.join(map(_key, extra))}"
+        )
     if unknown:
         raise ConfigError(f"unknown environment variables: {', '.join(map(_key, unknown))}")
 
@@ -447,7 +556,10 @@ def build_config(
         raise ConfigError(f"{where}: {', '.join(map(_key, sorted(unknown)))}")
     config = Config(
         server=_section("server", ServerConfig(), raw, origins),
-        auth=_section("auth", AuthConfig(), raw, origins),
+        auth=replace(
+            _section("auth", AuthConfig(), raw, origins),
+            extra_issuers=_extra_issuers(raw, origins),
+        ),
         rights=_section("rights", RightsConfig(), raw, origins),
         repo=_section("repo", RepoConfig(), raw, origins),
         index=_section("index", IndexConfig(), raw, origins),
@@ -577,12 +689,39 @@ def _check_required(config: Config, origins: _Origins) -> None:
         raise ConfigError(f"{head}: {names}")
 
 
-def _check_algorithms(config: Config, origins: _Origins) -> None:
-    for algorithm in config.auth.algorithms:
+def _refuse_symmetric(where: str, algorithms: tuple[str, ...]) -> None:
+    for algorithm in algorithms:
         if algorithm not in _ASYMMETRIC_ALGORITHMS:
-            where = origins.where("auth", "algorithms")
             allowed = ", ".join(sorted(_ASYMMETRIC_ALGORITHMS))
             raise ConfigError(f"{where} has {_shown(algorithm)}, not one of {allowed}")
+
+
+def _refuse_space_or_control(where: str, client_ids: tuple[str, ...]) -> None:
+    # Every write commit names the caller's client id in a trailer: a line break
+    # would add lines to the message. The value is never shown.
+    if any(_has_space_or_control(client_id) for client_id in client_ids):
+        raise ConfigError(f"{where} contains whitespace or control characters")
+
+
+def _check_algorithms(config: Config, origins: _Origins) -> None:
+    _refuse_symmetric(origins.where("auth", "algorithms"), config.auth.algorithms)
+
+
+def _check_issuers_differ(config: Config, origins: _Origins) -> None:
+    """Each issuer names one provider, whatever its trailing slash.
+
+    Tokens are handed to a verifier by their exact `iss`; two issuers apart only
+    by a trailing slash are one provider written twice.
+    """
+    seen = {config.auth.issuer.rstrip("/"): origins.named("auth", "issuer")}
+    for number, extra in enumerate(config.auth.extra_issuers, start=1):
+        name = f"{EXTRA_ISSUERS} entry {number}"
+        key = extra.issuer.rstrip("/")
+        if key in seen:
+            # Not shown: a URL may carry a credential.
+            where = origins.in_file(f"{name} issuer")
+            raise ConfigError(f"{where} repeats the issuer of {seen[key]}")
+        seen[key] = name
 
 
 def _check_names(config: Config, origins: _Origins) -> None:
@@ -605,6 +744,7 @@ def _check_names(config: Config, origins: _Origins) -> None:
         if _has_space_or_control(value):
             where = origins.where(section, key)
             raise ConfigError(f"{where} contains whitespace or control characters")
+    _refuse_space_or_control(origins.where("auth", "client_ids"), config.auth.client_ids)
     # git would read such a branch as an option, not a ref.
     if config.repo.branch.startswith("-"):
         raise ConfigError(f"{origins.where('repo', 'branch')} must not start with '-'")
@@ -623,6 +763,7 @@ def _check_index_outside_clone(config: Config, origins: _Origins) -> None:
 def _validate(config: Config, origins: _Origins) -> None:
     _check_required(config, origins)
     _check_algorithms(config, origins)
+    _check_issuers_differ(config, origins)
     _check_names(config, origins)
     _check_urls(config, origins)
     _check_index_outside_clone(config, origins)

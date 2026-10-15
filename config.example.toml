@@ -1,11 +1,12 @@
 # memex-mcp configuration. Every scalar or list setting can be overridden by an
 # environment variable MEMEX_<SECTION>_<KEY>, e.g. MEMEX_REPO_REMOTE or
-# MEMEX_AUTH_CLIENT_IDS (comma-separated). All values below are examples.
+# MEMEX_AUTH_CLIENT_IDS (comma-separated); [users] and [[auth.extra_issuers]]
+# live in this file only. All values below are examples.
 # Each number setting states its range below; one marked as a whole number
 # takes no decimal point, the others may have one. Numbers and booleans go
 # without quotes here; only an environment variable gives them as text. The
-# group names, the remote, the branch, the paths, the area names and the
-# embeddings model take no whitespace or control characters.
+# group names, the client ids, the remote, the branch, the paths, the area
+# names and the embeddings model take no whitespace or control characters.
 
 [server]
 host = "0.0.0.0"
@@ -41,6 +42,19 @@ leeway_seconds = 30
 jwks_min_refetch_seconds = 60
 # 0.1 to 86400.
 timeout_seconds = 5.0
+
+# Further Authentik providers whose tokens are accepted, one entry each: a
+# provider dedicated to memex for another front end, in the same Authentik with
+# the same usernames (the README's "Authentication" and "Trust model" say how
+# tokens are checked and why). Leeway, refetch wait and timeout are the ones
+# above. issuer, client_ids and algorithms are required; jwks_url defaults to
+# "<issuer>jwks/". The URLs follow the same rules as the issuer and jwks_url of
+# [auth], the lists those of client_ids and algorithms. No issuer may repeat
+# the one of [auth] or of another entry, not even apart from a trailing slash.
+# [[auth.extra_issuers]]
+# issuer = "https://auth.example.org/application/o/memex-openwebui/"
+# client_ids = ["memex-openwebui"]
+# algorithms = ["ES256"]
 
 [rights]
 # None of these may be empty.

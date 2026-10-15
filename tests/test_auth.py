@@ -48,7 +48,18 @@ def new_key() -> rsa.RSAPrivateKey:
     return rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
-def jwk_of(key: rsa.RSAPrivateKey, kid: str) -> dict[str, object]:
+# The key types a provider here signs with: RSA for RS256, EC P-256 for ES256.
+SigningKey = rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey
+
+
+def jwk_of(key: SigningKey, kid: str) -> dict[str, object]:
+    if isinstance(key, ec.EllipticCurvePrivateKey):
+        return {
+            **ECAlgorithm.to_jwk(key.public_key(), as_dict=True),
+            "kid": kid,
+            "alg": "ES256",
+            "use": "sig",
+        }
     jwk = RSAAlgorithm.to_jwk(key.public_key(), as_dict=True)
     return {**jwk, "kid": kid, "alg": "RS256", "use": "sig"}
 
@@ -96,8 +107,8 @@ CONNECTION_ERROR = "PyJWKClientConnectionError: Fail to fetch data from the url,
 class FakeJwks:
     """The provider's JWKS endpoint, served on 127.0.0.1; counts fetches and can go down."""
 
-    def __init__(self, *keys: tuple[rsa.RSAPrivateKey, str]) -> None:
-        self.keys: list[tuple[rsa.RSAPrivateKey, str]] = list(keys)
+    def __init__(self, *keys: tuple[SigningKey, str], path: str = JWKS_PATH) -> None:
+        self.keys: list[tuple[SigningKey, str]] = list(keys)
         self.fetches: int = 0
         self.down: bool = False
         # Answers every fetch with this instead of the keys above.
@@ -113,7 +124,7 @@ class FakeJwks:
                 pass
 
             def do_GET(self) -> None:
-                assert self.path == JWKS_PATH
+                assert self.path == path
                 jwks.fetches += 1
                 jwks.on_fetch()
                 time.sleep(jwks.delay)
@@ -129,7 +140,7 @@ class FakeJwks:
         self._thread: threading.Thread = threading.Thread(
             target=self._server.serve_forever, kwargs={"poll_interval": 0.01}
         )
-        self.url: str = f"http://127.0.0.1:{self._server.server_address[1]}{JWKS_PATH}"
+        self.url: str = f"http://127.0.0.1:{self._server.server_address[1]}{path}"
 
     def __enter__(self) -> Self:
         self._thread.start()

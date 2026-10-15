@@ -166,7 +166,7 @@ def _world(base: Path, foreign: dict[str, str], embedder: Embedder | None) -> st
     memex.prepare()
     try:
         memex.backfill()
-        caller = Identity("alice", frozenset({"memex", "household"}))
+        caller = Identity("alice", frozenset({"memex", "household"}), "claude-code")
         return json.dumps(memex.search(caller, "kestrel zzqqx filler", limit=50), sort_keys=True)
     finally:
         memex.index.close()

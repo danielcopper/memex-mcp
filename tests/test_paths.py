@@ -111,7 +111,7 @@ def test_an_area_directory_that_is_a_symlink_is_refused(tmp_path: Path, origin: 
     memex.prepare()
     try:
         (memex.root / "evil").symlink_to("bob")
-        eve = Identity("eve", frozenset({"memex"}))
+        eve = Identity("eve", frozenset({"memex"}), "claude-code")
         with pytest.raises(NotFound):
             memex.read(eve, "evil/memory/zebra.md")
         with pytest.raises(NotFound):
