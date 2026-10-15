@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/danielcopper/memex-mcp/compare/v0.3.0...v0.4.0) (2026-10-15)
+
+
+### Features
+
+* accept tokens from further authentik providers ([#23](https://github.com/danielcopper/memex-mcp/issues/23)) ([97c98c4](https://github.com/danielcopper/memex-mcp/commit/97c98c4fe5771da56443b82905e5a16ee2cc55e9))
+
 ## [0.3.0](https://github.com/danielcopper/memex-mcp/compare/v0.2.0...v0.3.0) (2026-10-11)
 
 
