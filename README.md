@@ -39,18 +39,19 @@ embedder that is off does not hold up the keyword index.
 its instructions, and a read-only credential suffices. With writing on, each write is one commit in the server's clone,
 pushed within the call: the caller is the commit's author (their username, and an e-mail address from
 `write.author_email`), the server its committer (`memex-mcp`). The message names the action and the path, never the
-content, in the format [docs/memex-format.md](docs/memex-format.md#commits) describes. The answer says whether the push
-went through. When the remote has commits the clone lacks, the server fetches and applies the write again on that state,
-up to three times; a write that no longer fits (the passage to replace is gone, the note changed since it was read, the
-path is taken) fails with that reason. When the remote cannot be reached, the commit stays in the clone, the answer says
-it is saved but not yet pushed, and every refresh round tries to push it again. When the remote refuses the push (a
-hook, a protected branch, missing rights), the answer says so and the commit stays in the clone; every refresh round
-tries again, and `/healthz` reports `failing` while the refusal lasts. If saved commits conflict with the remote when
-they are rebased, the server pushes them to a branch `conflict/memex-mcp-<date>`, logs an error, follows the remote
-again and reports `conflict` on `/healthz` until that branch is deleted; should even that push fail, a write waiting
-behind them is saved without further tries. One lock serialises the writes and the loop's rebasing and pushing; the
-loop's fetch runs outside it. After the commit the server re-indexes the touched notes, so search shows the change at
-once; should that fail, the write still counts and search catches up in the next round.
+content, and ends with a `Memex-Client` git trailer naming the client of the caller's token (its `azp`);
+[docs/memex-format.md](docs/memex-format.md#commits) describes the format and what the trailer is for. The answer says
+whether the push went through. When the remote has commits the clone lacks, the server fetches and applies the write
+again on that state, up to three times; a write that no longer fits (the passage to replace is gone, the note changed
+since it was read, the path is taken) fails with that reason. When the remote cannot be reached, the commit stays in the
+clone, the answer says it is saved but not yet pushed, and every refresh round tries to push it again. When the remote
+refuses the push (a hook, a protected branch, missing rights), the answer says so and the commit stays in the clone;
+every refresh round tries again, and `/healthz` reports `failing` while the refusal lasts. If saved commits conflict
+with the remote when they are rebased, the server pushes them to a branch `conflict/memex-mcp-<date>`, logs an error,
+follows the remote again and reports `conflict` on `/healthz` until that branch is deleted; should even that push fail,
+a write waiting behind them is saved without further tries. One lock serialises the writes and the loop's rebasing and
+pushing; the loop's fetch runs outside it. After the commit the server re-indexes the touched notes, so search shows the
+change at once; should that fail, the write still counts and search catches up in the next round.
 
 Guards on every write: a note may hold at most `write.max_note_bytes` (64 KiB) afterwards; new text or a path that
 contains a private key block or an access token with a well-known prefix (`ghp_`, `github_pat_`, `sk-`, `AKIA`, `xoxb-`,
@@ -72,6 +73,17 @@ than `auth.jwks_min_refetch_seconds` (60 by default) after the last successful f
 waits as long, counted from the failure and at least `auth.timeout_seconds`. When the set cannot be fetched once the
 five minutes are over, every token is rejected until a fetch succeeds; a token whose key is cached never waits for a
 fetch.
+
+Several providers may issue tokens. `[auth]` is the provider Claude Code logs in at (see
+[Claude Code setup](#claude-code-setup)), and each `[[auth.extra_issuers]]` entry is a further provider dedicated to
+memex for another front end. A token goes to the provider whose issuer equals its `iss` exactly and is checked against
+that provider's key set, algorithms and client ids only: a client id or algorithm allowed for one provider is never
+allowed for another. A token naming any other issuer is refused, with one warning, before any key set is fetched.
+
+Each provider has its own cached key set and its own wait after a failed fetch, so one whose key set cannot be fetched
+does not hold up the others; the leeway, the refetch wait and the timeout are those of `[auth]`. The protected resource
+metadata lists the issuer of `[auth]` first, then each further one in the order of the file. Users of every provider go
+through the same `[users]` mapping and group checks.
 
 **Rights.** Access requires membership in the group `memex`. A user reads the area their username maps to in the config
 and, as a member of the group `household`, the shared area too. Nothing else; there is no admin override. A user writes
@@ -117,6 +129,17 @@ for the note.
 - With writing on, the server pushes with a credential that can write the whole repository; the per-area write rights
   hold only for writes through the server. A commit's author is what the server sets from the verified token, but git
   itself does not verify authors: anyone else who can push can name any author.
+- A further issuer (`[[auth.extra_issuers]]`) must be the same identity provider installation as `[auth]` (the same
+  Authentik), with the same usernames: rights follow `preferred_username`, and the server cannot tell whether two
+  providers mean the same person by one name. The server does not check this; another identity provider, or one whose
+  users can pick their own names, could hand a person someone else's area.
+- Each further issuer is a provider and client dedicated to memex: its tokens are issued for memex alone. Never
+  configure a provider that also serves another application, such as the one a front end's own login uses. Its tokens
+  are meant for that application, which may hand them on to other tools; whoever holds one could then use memex in that
+  person's name. The MCP specification rules this out: a server takes only tokens issued for it as their audience, and
+  no others
+  ([token handling](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization#token-handling)).
+  Membership in `rights.access_group` stays the gate for every provider: the server checks it on every call.
 - The checks for secrets catch only unambiguous machine secrets in the text a write adds and in its path. Whatever a
   note holds is readable by everyone with the repository, as above.
 - Operators who need people separated at the git level would use one repository per person plus one shared repository.
@@ -126,10 +149,11 @@ for the note.
 
 One TOML file, named by `--config` or `MEMEX_CONFIG`; [`config.example.toml`](config.example.toml) lists every setting.
 Any scalar or list setting can be overridden by an environment variable `MEMEX_<SECTION>_<KEY>` (lists comma-separated),
-for example `MEMEX_REPO_REMOTE` for a remote URL that carries a credential. The `[users]` table lives in the file only.
-At startup the server checks types, ranges, URLs, names and required settings, and refuses to start on a value that
-fails, naming the setting and the file or variable it came from; the example file states the rules. A `MEMEX_` variable
-that names no setting, other than `MEMEX_CONFIG`, also stops the start.
+for example `MEMEX_REPO_REMOTE` for a remote URL that carries a credential. The `[users]` table and the
+`[[auth.extra_issuers]]` entries live in the file only. At startup the server checks types, ranges, URLs, names and
+required settings, and refuses to start on a value that fails, naming the setting and the file or variable it came from;
+the example file states the rules. A `MEMEX_` variable that names no setting, other than `MEMEX_CONFIG`, also stops the
+start.
 
 | Setting                                                    | Default                                    | Meaning                                                                   |
 | ---------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------- |
@@ -140,6 +164,7 @@ that names no setting, other than `MEMEX_CONFIG`, also stops the start.
 | `auth.jwks_url`                                            | `<issuer>jwks/`                            | the provider's JWKS endpoint                                              |
 | `auth.algorithms`                                          | `RS256`, `ES256`                           | accepted signing algorithms                                               |
 | `auth.scopes`                                              | `openid`, `profile`, `offline_access`      | scopes advertised to clients                                              |
+| `[[auth.extra_issuers]]`                                   | none                                       | further providers (file only), each with its own issuer and client ids    |
 | `rights.access_group`                                      | `memex`                                    | group required for any access                                             |
 | `rights.household_group`, `rights.household_area`          | `household`, `household`                   | group and directory of the shared area                                    |
 | `repo.path`                                                | required                                   | the server's clone                                                        |
@@ -191,10 +216,35 @@ These follow Authentik 2026.8's provider code and docs (`authentik/providers/oau
 `blueprints/system/providers-oauth2.yaml`); check a decoded token from your instance once, as described in the
 [setup check](#checking-a-live-token).
 
+### A provider for another front end
+
+A front end that connects to memex with its own OAuth client, such as Open WebUI's MCP connection in its "OAuth 2.1
+(Static)" mode, gets a provider of its own: Authentik has one client per provider. Its tokens then carry that front
+end's client id in `aud` and `azp`, and the commits of its writes name it in the `Memex-Client` trailer.
+
+- Create a further application (for example `memex-openwebui`) with an **OAuth2/OpenID provider**. **Client type:
+  Confidential**, since the front end keeps a client secret; the front end's callback URL as a strict redirect URI.
+- Bind the group `memex` to this application as well.
+- **Scopes** and **Include claims in id_token** as above.
+- **Signing key:** an asymmetric key pair, as above; an ECDSA (P-256) key signs ES256.
+- **Issuer mode:** each provider has its own issuer. Put that issuer, the client id and the algorithm into an
+  `[[auth.extra_issuers]]` entry; its `jwks_url` defaults to `<issuer>jwks/`:
+
+  ```toml
+  [[auth.extra_issuers]]
+  issuer = "https://auth.example.org/application/o/memex-openwebui/"
+  client_ids = ["memex-openwebui"]
+  algorithms = ["ES256"]
+  ```
+
+- Give the front end this provider's issuer as its OAuth server, with the client id and secret.
+
 ### Checking a live token
 
 After logging in, decode the access token's payload (the middle part, base64url) and check that it carries `iss` equal
-to `auth.issuer`, `aud` and `azp` equal to the client id, `preferred_username`, and `groups` with `memex`.
+to `auth.issuer`, `aud` and `azp` equal to the client id, `preferred_username`, and `groups` with `memex`. Check one
+token from each further provider the same way: `iss` equal to its entry's `issuer`, `aud` and `azp` one of the entry's
+`client_ids`, and the same `preferred_username` as the person has with `[auth]`.
 
 ## Claude Code setup
 
