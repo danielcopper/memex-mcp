@@ -10,6 +10,11 @@ groups (``groups``) from it; no introspection call per request. A token must
 name its signing key (``kid``); the key set is cached for
 ``JWKS_LIFESPAN_SECONDS``.
 
+Several providers may issue tokens: ``IssuerVerifier`` reads a token's
+unverified ``iss``, refuses any issuer that is not configured exactly before
+any key set is fetched, and hands the token to that issuer's own verifier,
+with its own key set, algorithms and client ids.
+
 A token without a well-formed ``preferred_username`` or ``groups`` claim is
 rejected: the provider is then missing the ``profile`` scope mapping, and
 without groups no rights decision is possible.
@@ -21,6 +26,7 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Sequence
 from http import HTTPStatus
 from typing import cast, override
 from urllib.error import HTTPError
@@ -61,12 +67,21 @@ _FETCH_ERRORS = (
     KeyError,
 )
 
-_HINT = "; is [auth] jwks_url the provider's JWKS endpoint?"
+# Each names the configuration entry the verifier came from: [auth] or an
+# [[auth.extra_issuers]] entry.
+_HINT = "; is {source} jwks_url the provider's JWKS endpoint?"
 # The derived jwks_url follows the issuer, so a wrong issuer path ends here too.
-_NOT_FOUND = "; check [auth] jwks_url, by default the issuer's path plus jwks/"
+_NOT_FOUND = "; check {source} jwks_url, by default the issuer's path plus jwks/"
 
-# What a token with an issuer other than [auth] issuer most likely is.
-_ISSUER_CAUSES = "(a token for another application, or a wrong [auth] issuer)"
+# What a token with an issuer other than the verifier's own most likely is. Only a
+# verifier used on its own sees one: IssuerVerifier hands it only tokens naming its issuer.
+_ISSUER_CAUSES = "(a token for another application, or a wrong {source} issuer)"
+
+# What a token naming none of the configured issuers most likely is.
+_UNKNOWN_ISSUER_CAUSES = "(a token for another application, or a wrong issuer in {sources})"
+
+# Where the verifier for the [auth] section comes from, for its log hints.
+AUTH_SOURCE = "[auth]"
 
 # What PyJWT raises out of a single entry when that entry makes it refuse the
 # whole set (see _FETCH_ERRORS); no other fetch was seen to raise these.
@@ -105,11 +120,19 @@ def _member(value: object) -> str:
     return repr(_clip(value)) if isinstance(value, str) else json_kind(value)
 
 
+def _unverified_claims(token: str) -> dict[str, object]:
+    """The token's claims as it states them, nothing checked; raises PyJWTError for no JWT."""
+    return cast("dict[str, object]", jwt.decode(token, options={"verify_signature": False}))
+
+
+def _shown_issuer(issuer: object) -> str:
+    """An `iss` for a log line, clipped, or its kind if it is not a string."""
+    return repr(_clip(issuer, _ISSUER_CHARS)) if isinstance(issuer, str) else json_kind(issuer)
+
+
 def _issuer_of(token: str) -> str:
     """The token's `iss` for a log line, clipped, or its kind if it is not a string."""
-    claims = cast("dict[str, object]", jwt.decode(token, options={"verify_signature": False}))
-    issuer = claims.get("iss")
-    return repr(_clip(issuer, _ISSUER_CHARS)) if isinstance(issuer, str) else json_kind(issuer)
+    return _shown_issuer(_unverified_claims(token).get("iss"))
 
 
 def _is_signing_key(key: jwt.PyJWK) -> bool:
@@ -190,16 +213,16 @@ def _log_notes(notes: list[tuple[int, str]]) -> None:
             log.log(level, "and %d more key set entries not used", len(lines) - _ENTRY_LINES)
 
 
-def _explanation(exc: Exception) -> str:
+def _explanation(exc: Exception, source: str) -> str:
     """What the failure of a fetch says about the configuration, for the log line."""
     # PyJWT reports an HTTP error status as a connection error caused by urllib's HTTPError.
     if isinstance(exc.__cause__, HTTPError) and exc.__cause__.code == HTTPStatus.NOT_FOUND:
-        return _NOT_FOUND
+        return _NOT_FOUND.format(source=source)
     if isinstance(exc, jwt.PyJWKClientConnectionError | OSError):
         return ""  # says nothing about what the endpoint is
     if isinstance(exc, _ENTRY_ERRORS):
         return _ENTRY_REFUSED
-    return _HINT
+    return _HINT.format(source=source)
 
 
 class _KeySetUnavailable(jwt.PyJWKClientError):
@@ -214,7 +237,9 @@ class _ProviderJwks(jwt.PyJWKClient):
     cache without the lock in ``cached_key``.
     """
 
-    def __init__(self, uri: str, *, timeout: float, cooldown: float) -> None:
+    def __init__(
+        self, uri: str, *, timeout: float, cooldown: float, source: str = AUTH_SOURCE
+    ) -> None:
         # A token with a kid the cached set lacks refetches the set, but not
         # sooner than the cooldown after the last successful fetch.
         super().__init__(
@@ -227,6 +252,7 @@ class _ProviderJwks(jwt.PyJWKClient):
         # After a failed fetch, the next waits the cooldown, but at least the
         # timeout: a cooldown of 0 must not turn an outage into a fetch per request.
         self._wait: float = max(cooldown, timeout)
+        self._source: str = source
         # No fetch before this time on the monotonic clock, after a failed one.
         self._retry_at: float = -float("inf")
         self._failures: int = 0
@@ -285,7 +311,7 @@ class _ProviderJwks(jwt.PyJWKClient):
             self.uri,
             type(exc).__name__,
             _escaped(str(exc), _TEXT_CHARS) or "no detail",
-            _explanation(exc),
+            _explanation(exc, self._source),
             consequence,
             self._wait,
         )
@@ -338,6 +364,7 @@ class AuthentikTokenVerifier(TokenVerifier):
         leeway_seconds: int,
         jwks_min_refetch_seconds: int,
         timeout_seconds: float,
+        source: str = AUTH_SOURCE,
     ) -> None:
         super().__init__()
         self.issuer: str = issuer
@@ -345,8 +372,10 @@ class AuthentikTokenVerifier(TokenVerifier):
         self.client_ids: tuple[str, ...] = client_ids
         self.algorithms: tuple[str, ...] = algorithms
         self.leeway: int = leeway_seconds
+        # The configuration entry this verifier comes from, named in its log hints.
+        self.source: str = source
         self._jwks: _ProviderJwks = _ProviderJwks(
-            jwks_url, timeout=timeout_seconds, cooldown=jwks_min_refetch_seconds
+            jwks_url, timeout=timeout_seconds, cooldown=jwks_min_refetch_seconds, source=source
         )
         # PyJWKClient blocks on its own lock while it fetches; one thread at a
         # time keeps the waiting requests off the shared worker threads.
@@ -421,15 +450,17 @@ class AuthentikTokenVerifier(TokenVerifier):
                 ),
             )
         except jwt.InvalidIssuerError:
-            # PyJWT checks the claims only after the signature, so a key in the
-            # provider's set signed this token. Authentik providers often share one
-            # signing certificate (and kid), so a token issued for another
-            # application ends here too, not only a wrong [auth] issuer.
+            # Reached only when this verifier is used on its own: IssuerVerifier
+            # hands it only tokens whose `iss` is its issuer. PyJWT checks the
+            # claims only after the signature, so a key in the provider's set
+            # signed this token; Authentik providers often share one signing
+            # certificate (and kid), so a token issued for another application
+            # ends here too, not only a wrong issuer setting.
             log.warning(
                 "bearer token rejected: issuer %s, expected %r %s",
                 _issuer_of(token),
                 self.issuer,
-                _ISSUER_CAUSES,
+                _ISSUER_CAUSES.format(source=self.source),
             )
             return None
         except jwt.PyJWTError as exc:
@@ -465,6 +496,44 @@ class AuthentikTokenVerifier(TokenVerifier):
         )
 
 
+class IssuerVerifier(TokenVerifier):
+    """Hands each token to the verifier of the issuer it names, by the exact string.
+
+    A token naming any other issuer is refused before any key set is fetched,
+    so an unknown issuer costs no request to any provider. Each issuer's
+    verifier checks the signature, `iss`, `aud` and `azp` against its own
+    settings only: a client id or algorithm allowed for one issuer is never
+    allowed for another.
+    """
+
+    def __init__(self, verifiers: Sequence[AuthentikTokenVerifier]) -> None:
+        super().__init__()
+        self._by_issuer: dict[str, AuthentikTokenVerifier] = {v.issuer: v for v in verifiers}
+        if len(self._by_issuer) != len(verifiers):
+            raise ValueError("two verifiers for one issuer")
+        # The configuration entries, for the line about an unknown issuer.
+        self._sources: str = " or ".join(v.source for v in verifiers)
+
+    @override
+    async def verify_token(self, token: str) -> AccessToken | None:
+        try:
+            issuer = _unverified_claims(token).get("iss")
+        except jwt.PyJWTError:
+            log.info("bearer token rejected: not a JWT")
+            return None
+        # A string check first: an `iss` that is a list cannot be a key.
+        verifier = self._by_issuer.get(issuer) if isinstance(issuer, str) else None
+        if verifier is None:
+            log.warning(
+                "bearer token rejected: issuer %s, expected %s %s",
+                _shown_issuer(issuer),
+                " or ".join(map(repr, self._by_issuer)),
+                _UNKNOWN_ISSUER_CAUSES.format(sources=self._sources),
+            )
+            return None
+        return await verifier.verify_token(token)
+
+
 def identity_from(token: AccessToken | None) -> Identity:
     """The caller's identity from a token this module validated."""
     if token is None:
@@ -474,5 +543,8 @@ def identity_from(token: AccessToken | None) -> Identity:
     if not isinstance(username, str) or not isinstance(groups, list):
         raise PermissionError("the token carries no identity")
     return Identity(
-        username=username, groups=frozenset(str(g) for g in cast("list[object]", groups))
+        username=username,
+        groups=frozenset(str(g) for g in cast("list[object]", groups)),
+        # The verifier has checked `azp` against the issuer's client ids.
+        client=token.client_id,
     )

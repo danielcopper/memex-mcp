@@ -307,12 +307,12 @@ def memex(tmp_path: Path, origin: Origin) -> Iterator[Memex]:
 
 
 # Identities as Authentik would describe them.
-ALICE = Identity("alice", frozenset({"memex", "household"}))
-BOB = Identity("bob", frozenset({"memex", "household"}))
-CAROL = Identity("carol", frozenset({"memex"}))
+ALICE = Identity("alice", frozenset({"memex", "household"}), "claude-code")
+BOB = Identity("bob", frozenset({"memex", "household"}), "claude-code")
+CAROL = Identity("carol", frozenset({"memex"}), "claude-code")
 # Mapped to an area, but not in the memex group.
-MALLORY = Identity("mallory", frozenset({"household"}))
+MALLORY = Identity("mallory", frozenset({"household"}), "claude-code")
 # In the memex group, but no area is configured for them.
-STRANGER = Identity("stranger", frozenset({"memex"}))
+STRANGER = Identity("stranger", frozenset({"memex"}), "claude-code")
 # Unmapped, but in memex and household: reaches the shared area only.
-GUEST = Identity("guest", frozenset({"memex", "household"}))
+GUEST = Identity("guest", frozenset({"memex", "household"}), "claude-code")

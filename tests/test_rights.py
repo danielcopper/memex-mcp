@@ -111,7 +111,7 @@ def test_no_memex_group_is_rejected_by_every_tool(memex: Memex) -> None:
 
 
 def test_household_needs_the_group_even_for_the_owner(memex: Memex) -> None:
-    alice_alone = Identity("alice", frozenset({"memex"}))
+    alice_alone = Identity("alice", frozenset({"memex"}), "claude-code")
     with pytest.raises(NotFound):
         memex.read(alice_alone, "household/memory/zebra.md")
     assert memex.read(alice_alone, "alice/memory/zebra.md")["area"] == "alice"
@@ -126,7 +126,7 @@ def test_policy_without_access_group_gives_nothing() -> None:
     )
     assert policy.areas_for(ALICE) == {"alice", "household"}
     with pytest.raises(AccessDenied):
-        policy.areas_for(Identity("alice", frozenset({"household", "admins"})))
+        policy.areas_for(Identity("alice", frozenset({"household", "admins"}), "claude-code"))
 
 
 def test_config_refuses_a_user_mapped_to_the_household_area(tmp_path: Path) -> None:

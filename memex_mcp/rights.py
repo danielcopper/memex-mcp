@@ -85,6 +85,9 @@ class NotFound(Exception):
 class Identity:
     username: str
     groups: frozenset[str]
+    # The OAuth client the caller came through (the verified token's `azp`); rights do
+    # not depend on it, every write commit names it.
+    client: str
 
 
 @dataclass(frozen=True)

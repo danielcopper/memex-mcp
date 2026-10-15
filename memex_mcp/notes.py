@@ -38,6 +38,8 @@ MAX_SECTION_CHARS = 100
 SECTION_LEVEL = 2
 # A topic folder's path: area, memory or wiki, topic.
 _TOPIC_DEPTH = 3
+# The git trailer that names the OAuth client of a write.
+CLIENT_TRAILER = "Memex-Client"
 
 CHANGED_SINCE_READ = "the note changed since you read it; read it again"
 MISSING_TOPIC = (
@@ -383,6 +385,15 @@ def with_topic(text: str, entry: str) -> str:
 
 
 # -- commits -----------------------------------------------------------
+
+
+def with_client(message: str, client: str) -> str:
+    """``message`` with a last paragraph naming the client: the git trailer ``Memex-Client``.
+
+    The client id comes from the verified token and equals a configured one;
+    ``git log --format='%(trailers:key=Memex-Client)'`` lists it per write.
+    """
+    return f"{message}\n\n{CLIENT_TRAILER}: {client}"
 
 
 def commit_message(writer: str, changes: Sequence[tuple[Action, str]]) -> str:

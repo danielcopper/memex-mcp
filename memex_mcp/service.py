@@ -55,6 +55,7 @@ from memex_mcp.notes import (
     new_note,
     section_names,
     version_of,
+    with_client,
     with_entry,
     with_topic,
 )
@@ -633,7 +634,9 @@ class Memex:
         author = self._author(identity)
         with self._git_lock:
             try:
-                plan, commit, outcome = self._commit_and_push(parts, area, plan_of, author)
+                plan, commit, outcome = self._commit_and_push(
+                    parts, area, plan_of, author, identity.client
+                )
             finally:
                 searchable = self._reindex()
         result: WriteResult = {
@@ -663,6 +666,7 @@ class Memex:
         area: str,
         plan_of: Callable[[tuple[str, ...], Path], _Plan],
         author: Author,
+        client: str,
     ) -> tuple[_Plan, str, Push]:
         """Commit the write and push it; when the remote has newer commits, apply it again
         on them, up to PUSH_RETRIES times.
@@ -678,7 +682,7 @@ class Memex:
         while True:
             base = self.repo.head()
             plan = plan_of(parts, resolve_write(self.root, parts, area))
-            commit = self._commit(plan, author, base)
+            commit = self._commit(plan, author, client, base)
             outcome = Push.REJECTED if stuck else self.repo.push()
             if outcome is not Push.REJECTED or attempt == PUSH_RETRIES or stuck:
                 break
@@ -697,9 +701,15 @@ class Memex:
             )
         return plan, commit, outcome
 
-    def _commit(self, plan: _Plan, author: Author, base: str) -> str:
-        """Write the plan's files and commit them; on any failure the tree goes back to ``base``."""
-        message = commit_message(WRITER, [(change.action, change.path) for change in plan.changes])
+    def _commit(self, plan: _Plan, author: Author, client: str, base: str) -> str:
+        """Write the plan's files and commit them; on any failure the tree goes back to ``base``.
+
+        The message ends with the client the caller came through, as a git trailer.
+        """
+        changes: list[tuple[Action, str]] = [
+            (change.action, change.path) for change in plan.changes
+        ]
+        message = with_client(commit_message(WRITER, changes), client)
         try:
             for change in plan.changes:
                 target = self.root / change.path

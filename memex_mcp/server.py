@@ -15,7 +15,7 @@ from typing import Annotated
 import anyio
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from fastmcp.server.auth import RemoteAuthProvider
+from fastmcp.server.auth import RemoteAuthProvider, TokenVerifier
 from fastmcp.server.dependencies import get_access_token
 from pydantic import AnyHttpUrl, Field
 from starlette.applications import Starlette
@@ -23,8 +23,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from memex_mcp.auth import AuthentikTokenVerifier, identity_from
-from memex_mcp.config import Config
+from memex_mcp.auth import AUTH_SOURCE, AuthentikTokenVerifier, IssuerVerifier, identity_from
+from memex_mcp.config import EXTRA_ISSUERS, Config, IssuerConfig
 from memex_mcp.rights import AccessDenied, Identity, InvalidRequest, NotFound
 from memex_mcp.service import MAX_QUERY_CHARS, MAX_QUERY_WORDS, IndexLine, Memex
 
@@ -69,21 +69,41 @@ WRITE_PATH_HELP = (
 VERSION_HELP = "The note's version as read returned it."
 
 
-def build_auth(
-    config: Config, verifier: AuthentikTokenVerifier | None = None
-) -> RemoteAuthProvider:
-    verifier = verifier or AuthentikTokenVerifier(
-        issuer=config.auth.issuer,
-        jwks_url=config.jwks_url,
-        client_ids=config.auth.client_ids,
-        algorithms=config.auth.algorithms,
-        leeway_seconds=config.auth.leeway_seconds,
-        jwks_min_refetch_seconds=config.auth.jwks_min_refetch_seconds,
-        timeout_seconds=config.auth.timeout_seconds,
+def build_verifier(config: Config) -> IssuerVerifier:
+    """One verifier per configured issuer, [auth]'s first, behind one that picks by `iss`.
+
+    Every issuer shares [auth]'s leeway, refetch wait and timeout.
+    """
+    auth = config.auth
+    entries = [
+        IssuerConfig(auth.issuer, config.jwks_url, auth.client_ids, auth.algorithms),
+        *auth.extra_issuers,
+    ]
+    sources = [AUTH_SOURCE, *(f"{EXTRA_ISSUERS} entry {n}" for n in range(1, len(entries)))]
+    return IssuerVerifier(
+        [
+            AuthentikTokenVerifier(
+                issuer=entry.issuer,
+                jwks_url=entry.jwks_url,
+                client_ids=entry.client_ids,
+                algorithms=entry.algorithms,
+                leeway_seconds=auth.leeway_seconds,
+                jwks_min_refetch_seconds=auth.jwks_min_refetch_seconds,
+                timeout_seconds=auth.timeout_seconds,
+                source=source,
+            )
+            for entry, source in zip(entries, sources, strict=True)
+        ]
     )
+
+
+def build_auth(config: Config, verifier: TokenVerifier | None = None) -> RemoteAuthProvider:
+    # [auth]'s issuer first: a client that takes the first authorization server
+    # logs in where the server's own clients are registered.
+    issuers = [config.auth.issuer, *(extra.issuer for extra in config.auth.extra_issuers)]
     return RemoteAuthProvider(
-        token_verifier=verifier,
-        authorization_servers=[AnyHttpUrl(config.auth.issuer)],
+        token_verifier=verifier or build_verifier(config),
+        authorization_servers=[AnyHttpUrl(issuer) for issuer in issuers],
         base_url=config.server.public_url,
         scopes_supported=list(config.auth.scopes),
         resource_name="memex",
@@ -337,7 +357,7 @@ def _add_write_tools(mcp: FastMCP, config: Config, memex: Memex) -> None:
 def build_app(
     config: Config,
     memex: Memex,
-    verifier: AuthentikTokenVerifier | None = None,
+    verifier: TokenVerifier | None = None,
     run_loop: bool = True,
 ) -> Starlette:
     auth = build_auth(config, verifier)

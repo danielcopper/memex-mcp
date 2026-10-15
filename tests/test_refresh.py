@@ -443,7 +443,7 @@ def test_first_note_of_a_new_area_failing_half_way_does_not_stop_refresh(
         )
         _fail_after_first_chunk(monkeypatch)
         assert memex.refresh() is True
-        dave = Identity("dave", frozenset({"memex"}))
+        dave = Identity("dave", frozenset({"memex"}), "claude-code")
         hits = memex.search(dave, "quokka")["hits"]
         assert [h["path"] for h in hits] == ["dave/memory/later.md"]
     finally:
@@ -484,7 +484,7 @@ def test_a_changed_area_set_rebuilds(tmp_path: Path, origin: Origin) -> None:
     second = Memex.from_config(make_config(tmp_path, origin, users={"dave": "dave"}), None)
     second.prepare()
     try:
-        dave = Identity("dave", frozenset({"memex"}))
+        dave = Identity("dave", frozenset({"memex"}), "claude-code")
         assert [h["path"] for h in second.search(dave, "wombat")["hits"]] == ["dave/memory/note.md"]
     finally:
         second.index.close()
