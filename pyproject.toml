@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["basedpyright==1.40.2", "pytest==9.1.1", "ruff==0.16.10"]
+dev = ["basedpyright==1.40.2", "pytest==9.1.1", "ruff==0.17.0"]
 
 [project.scripts]
 memex-mcp = "memex_mcp.__main__:main"
