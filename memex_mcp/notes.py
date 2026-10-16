@@ -434,8 +434,8 @@ def with_main_topic(text: str, entry: str) -> str:
     """The main index of memory with ``entry`` as the last line of its section ``Topics``.
 
     That section is matched ignoring case and stays where it is. When the index
-    has none, it is inserted before the first section, so that the topics come
-    before the notes; in an index without sections it ends the file.
+    has none, it is inserted before the first section, before any section of
+    notes; in an index without sections it ends the file.
     """
     lines = _lines(text)
     found = headings(lines)

@@ -18,8 +18,8 @@ Each area holds two folders:
 
 A **topic** is a folder directly under `<area>/memory/` or `<area>/wiki/`, for example `alice/memory/homelab/` or
 `alice/wiki/networking/`. A topic may have subfolders; they belong to it. Notes directly in `<area>/memory/` belong to
-that folder itself, which then acts as a topic of its own. Wiki notes belong in a topic folder: memex-mcp creates none
-directly in `<area>/wiki/`, whose only index is the master index of topics, but notes already there can still be
+no topic; the main index lists them (see [Indexes](#indexes)). Wiki notes belong in a topic folder: memex-mcp creates
+none directly in `<area>/wiki/`, whose only index is the master index of topics, but notes already there can still be
 changed.
 
 Two folder names have a meaning wherever they appear:
@@ -52,16 +52,15 @@ household/
 ```
 
 A person may keep a **profile** at `<area>/memory/profile.md`: short facts about them only (who they are, their home and
-what they own and use, habits, the people around them), no links to other notes, under 300 words. memex-mcp's
-instructions tell assistants to read it at the start of a conversation. memex-mcp treats it as an ordinary note directly
-in `<area>/memory/`.
+what they own and use, habits, the people around them), no links to other notes, under 300 words. memex-mcp treats it as
+an ordinary note directly in `<area>/memory/`.
 
 ## Indexes
 
 Each topic has one index file: `MEMORY.md` in memory, `_index.md` in the wiki, in the topic folder. A note is listed in
 its topic's index, also when it lies in a subfolder of the topic; an index file in a subfolder is not used.
 
-Each kind also has a list of the area's topics, one line per topic. In memory it is the **main index**
+Memory and the wiki each have a list of the area's topics, one line per topic. In memory it is the **main index**
 `<area>/memory/MEMORY.md`, which also lists the notes directly in `<area>/memory/`; in the wiki it is the **master
 index** `<area>/wiki/_master-index.md`, which lists topics only.
 
@@ -86,21 +85,23 @@ formats:
 
 **Adding a note.** Whoever creates a note adds its line in the same commit, at the end of a section they choose. A
 section whose name equals an existing one ignoring case is that section; a section that does not exist yet is added at
-the end of the index. When the topic has no index yet, the writer creates it with a heading naming the topic
-(`# networking`; for `<area>/memory/` itself, `# <area> memory`).
+the end of the index. When the note's index does not exist yet, the writer creates it with a heading naming the topic
+(`# networking`; for the main index, `# <area> memory`). A note directly in `<area>/memory/` cannot use the section
+`Topics` (in any letter case), which lists the topics.
 
-**Adding a topic.** The first note of a new topic, one whose folder has no index yet, also brings a description of the
-topic, and the writer adds the topic's line in the same commit:
+**Adding a topic.** The first note of a new topic, a topic folder (not `<area>/memory/` itself) that has no index yet,
+also brings a description of the topic, and the writer adds the topic's line in the same commit:
 
-- In memory, at the end of the main index's section `## Topics` (matched ignoring case), which stands before the
-  sections of notes. When the main index has no such section, the writer inserts it after the heading and any text
+- In memory, at the end of the main index's section `## Topics` (matched ignoring case), which the writer places before
+  the sections of notes. When the main index has no such section, the writer inserts it after the heading and any text
   before the first section, or at the end of an index without sections; an existing `## Topics` stays where it is. A
   missing main index is created as `# <area> memory` with a section `## Topics`.
 - In the wiki, at the end of the master index's first section (at the end of the file when it has no section). A missing
   master index is created as `# Wiki master index` with a section `## Topics`.
 
-A topic the list already names gets no second line. `archive/` is a topic like any other; notes in `daily/` take no
-index line, so a `daily/` folder never starts a topic.
+When the list already holds the exact link the writer would add (`[<topic>/MEMORY.md](<topic>/MEMORY.md)` or
+`[[wiki/<topic>/_index|<topic>]]`), the writer adds no second line. `<area>/memory/archive/` is a topic like any other;
+notes in `daily/` take no index line, so a `daily/` folder never starts a topic.
 
 Reordering, rewording and removing index lines are left to a cleanup run started by a person. Deleting a note leaves its
 line in place until then.
@@ -179,6 +180,7 @@ line in the commit that creates the note. Every other rule holds only for writes
 | No hidden files, no symlinks                                                           | enforced                         | —                     |
 | Protected files and index files                                                        | enforced                         | —                     |
 | New wiki notes only in a topic folder                                                  | enforced                         | —                     |
+| No note directly in `<area>/memory/` under the section `Topics`                        | enforced                         | —                     |
 | A note at most 64 KiB after a write (`write.max_note_bytes`)                           | enforced                         | —                     |
 | No machine secrets (private keys, access tokens) in written text or paths              | enforced                         | —                     |
 | Index texts and paths without control or format characters, `<!--` or a word-start `@` | enforced                         | —                     |
