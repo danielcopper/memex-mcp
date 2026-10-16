@@ -369,6 +369,13 @@ def test_the_topics_section_of_the_main_index_comes_before_the_notes() -> None:
     )
 
 
+def test_an_inserted_topics_section_is_set_off_by_a_blank_line() -> None:
+    main = "# alice memory\n## Bikes\n- b\n"
+    assert with_main_topic(main, "- new") == (
+        "# alice memory\n\n## Topics\n\n- new\n\n## Bikes\n- b\n"
+    )
+
+
 def test_an_existing_topics_section_stays_where_it_is() -> None:
     main = "# alice memory\n\n## Bikes\n\n- b\n\n## topics\n\n- [a/MEMORY.md](a/MEMORY.md) — a\n"
     assert with_main_topic(main, "- new") == main + "- new\n"
