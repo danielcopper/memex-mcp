@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterator
+from functools import partial
 from pathlib import Path
 from typing import cast
 
@@ -11,7 +12,7 @@ import pytest
 
 import memex_mcp.rights as rights_module
 from memex_mcp.config import build_config, load_config
-from memex_mcp.notes import CHANGED_SINCE_READ, version_of
+from memex_mcp.notes import CHANGED_SINCE_READ, TOPICS_SECTION_TAKEN, version_of
 from memex_mcp.rights import (
     ACCESS_DENIED,
     FORBIDDEN_CHARACTER,
@@ -575,10 +576,10 @@ def test_a_note_in_the_main_index_cannot_take_the_section_of_topics(
 ) -> None:
     head = remote.head()
     for section in ("Topics", "topics", "## TOPICS"):
-        with pytest.raises(
-            InvalidRequest, match="^the section Topics lists topics; choose another"
-        ):
-            memex.create(ALICE, "alice/memory/bikes.md", "# Bikes\n", IndexLine(section, LINE))
+        listing = IndexLine(section, LINE)
+        call = partial(memex.create, ALICE, "alice/memory/bikes.md", "# Bikes\n", listing)
+        # The whole message: it names no area or path.
+        assert refusal(call) == (InvalidRequest, TOPICS_SECTION_TAKEN)
     assert remote.head() == head
     # In a topic's own index, a section of that name is an ordinary one.
     listing = IndexLine("Topics", LINE, "beds")
