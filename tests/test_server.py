@@ -245,10 +245,19 @@ async def test_areas_tool_answers_the_callers_areas_only(tmp_path: Path, origin:
     async with serve(tmp_path, origin) as client:
         bob = await call(client, token(preferred_username="bob"), "areas")
         assert bob["isError"] is False
-        assert bob["structuredContent"] == {"areas": ["bob", "household"]}
+        assert bob["structuredContent"] == {"areas": ["bob", "household"], "own": "bob"}
         outsider = await call(client, token(groups=["household"]), "areas")
         assert outsider["isError"] is True
         assert outsider["content"][0]["text"] == ACCESS_DENIED
+
+
+@pytest.mark.anyio
+async def test_areas_answers_null_for_a_caller_without_a_personal_area(
+    tmp_path: Path, origin: Origin
+) -> None:
+    async with serve(tmp_path, origin) as client:
+        guest = await call(client, token(preferred_username="guest"), "areas")
+        assert guest["structuredContent"] == {"areas": ["household"], "own": None}
 
 
 def break_remote(memex: Memex, origin: Origin) -> None:
@@ -428,9 +437,40 @@ async def test_with_writing_on_the_instructions_name_the_write_tools(
             },
             bearer=token(),
         )
-        instructions = cast("str", initialized.json()["result"]["instructions"])
-        assert "`create` a note" in instructions
+        instructions = " ".join(cast("str", initialized.json()["result"]["instructions"]).split())
+        assert "`index_sections` before `create`" in instructions
+        assert "`edit` the line" in instructions
+        assert "`delete` only when asked" in instructions
         assert "a password the user" in instructions
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("write", [True, False], ids=["writing-on", "writing-off"])
+async def test_the_instructions_name_the_profile_and_both_topic_lists(
+    tmp_path: Path, origin: Origin, write: bool
+) -> None:
+    async with serving(tmp_path, origin, write=write) as (client, _memex):
+        initialized = await rpc(
+            client,
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"},
+            },
+            bearer=token(),
+        )
+        instructions = " ".join(cast("str", initialized.json()["result"]["instructions"]).split())
+        # What to read at the start of a conversation, whether writing is on or off.
+        for path in (
+            "`<area>/memory/profile.md`",
+            "`<area>/memory/MEMORY.md`",
+            "`<area>/wiki/_master-index.md`",
+        ):
+            assert path in instructions
+        # When and where to write, only with writing on.
+        assert ("Write to `memory/`" in instructions) is write
+        assert ("offer once per conversation" in instructions) is write
 
 
 @pytest.mark.anyio
