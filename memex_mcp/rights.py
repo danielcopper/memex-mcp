@@ -20,8 +20,8 @@ names ``CLAUDE.md``, ``CLAUDE.local.md`` or ``AGENTS.md`` in any letter case,
 as a file or as a folder; no write names an index file (``MEMORY.md``,
 ``_index.md``, ``_master-index.md``) either, since indexes change only
 through ``create``, which adds a new note's line and creates the index, a
-section or the master index line when needed; and no write follows a symlink
-anywhere on its path.
+section or the topic's line in the main index of memory or the wiki's master
+index when needed; and no write follows a symlink anywhere on its path.
 """
 
 from __future__ import annotations
@@ -41,8 +41,9 @@ WRITABLE_FOLDERS = frozenset({"memory", "wiki"})
 # Loaded by assistants (Claude Code and others) that open the folder: never written through
 # the server. Compared ignoring case, against every segment of a path.
 PROTECTED_NAMES = frozenset({"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"})
-# Changed only by create: a new note's line, and the index, a section or the master index
-# line when needed. Compared like PROTECTED_NAMES.
+# Changed only by create: a new note's line, and the index, a section or the topic's line
+# in the main index of memory or the wiki's master index when needed. Compared like
+# PROTECTED_NAMES.
 INDEX_NAMES = frozenset({"MEMORY.md", "_index.md", "_master-index.md"})
 _PROTECTED_FOLDED = frozenset(name.casefold() for name in PROTECTED_NAMES)
 _INDEX_FOLDED = frozenset(name.casefold() for name in INDEX_NAMES)

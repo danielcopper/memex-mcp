@@ -277,8 +277,9 @@ def _add_write_tools(mcp: FastMCP, config: Config, memex: Memex) -> None:
             str | None,
             Field(
                 description=(
-                    "Only for the first note of a new wiki topic: what the topic holds, "
-                    "for the master index; one line of at most 300 characters."
+                    "Only for the first note of a new topic (index_sections says new_topic): "
+                    "what the topic holds, for the area's list of topics; one line of at "
+                    "most 300 characters."
                 )
             ),
         ] = None,
@@ -287,7 +288,8 @@ def _add_write_tools(mcp: FastMCP, config: Config, memex: Memex) -> None:
 
         Refuses a path where a note exists. Notes in a `daily/` folder take no
         index line; every other note needs index_section and index_line, and the
-        first note of a new wiki topic also topic_description. Returns the commit,
+        first note of a new topic also topic_description, which adds the topic's line
+        to the main index of memory or the wiki's master index. Returns the commit,
         whether it was pushed, and the note's version.
         """
         identity = _caller()
@@ -348,8 +350,9 @@ def _add_write_tools(mcp: FastMCP, config: Config, memex: Memex) -> None:
         ],
     ) -> Mapping[str, object]:
         """Show the index a new note there would be listed in: its path, whether it exists
-        yet, its sections, and `new_topic`, true when the note would start a new wiki topic
-        and create then needs topic_description. A note in a `daily/` folder has no index."""
+        yet, its sections, and `new_topic`, true when the note would start a new topic in
+        memory or the wiki and create then needs topic_description. A note in a `daily/`
+        folder has no index."""
         identity = _caller()
         return await _run(partial(memex.index_sections, identity, path))
 

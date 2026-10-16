@@ -43,8 +43,8 @@ CLIENT_TRAILER = "Memex-Client"
 
 CHANGED_SINCE_READ = "the note changed since you read it; read it again"
 MISSING_TOPIC = (
-    "the first note of a new wiki topic needs topic_description, one line that says "
-    "what the topic holds, for the master index"
+    "the first note of a new topic needs topic_description, one line that says "
+    "what the topic holds, for the area's list of topics"
 )
 
 # Unambiguous machine secrets only, never passwords in prose. Each pattern is
@@ -160,6 +160,23 @@ class IndexSpot:
     def name(self) -> str:
         return INDEX_FILE[self.folder]
 
+    @property
+    def is_topic(self) -> bool:
+        """Whether this is a topic folder, not ``<area>/memory`` itself."""
+        return len(self.topic) == _TOPIC_DEPTH
+
+    @property
+    def topic_list(self) -> tuple[str, ...]:
+        """The index that lists the area's topics of this kind: the master index of the
+        wiki, the main index of memory."""
+        return (*self.topic[:2], MASTER_INDEX if self.folder == "wiki" else INDEX_FILE["memory"])
+
+
+def is_new_topic(spot: IndexSpot, index: str | None) -> bool:
+    """Whether a note listed at ``spot``, whose index text is ``index``, starts a new topic:
+    a topic folder without an index yet. create then needs topic_description."""
+    return index is None and spot.is_topic
+
 
 def index_spot(parts: tuple[str, ...]) -> IndexSpot:
     """The topic whose index a new note at ``parts`` is listed in.
@@ -267,7 +284,7 @@ def checked_line(value: str | None, sections: Sequence[str] | None) -> str:
 
 
 def checked_topic(value: str | None) -> str:
-    """A new wiki topic's line for the master index."""
+    """A new topic's line for the area's list of topics of its kind."""
     return _checked_description(
         value,
         "topic_description",
@@ -303,16 +320,20 @@ def index_entry(
     if folder == "wiki":
         name = note[-1].removesuffix(NOTE_SUFFIX)
         return f"- [[{name}]] — {description}"
-    relative = "/".join(note[len(topic) :])
+    return f"- {_memory_link('/'.join(note[len(topic) :]))} — {description}"
+
+
+def _memory_link(relative: str) -> str:
+    """A ``MEMORY.md`` link to the file at ``relative``, from the index's folder."""
     label = relative.replace("[", "\\[").replace("]", "\\]")
-    return f"- [{label}]({_link_target(relative)}) — {description}"
+    return f"[{label}]({_link_target(relative)})"
 
 
 def new_index(spot: IndexSpot) -> str:
     """The heading of an index the server creates for a topic that has none."""
     topic = spot.topic
     # A topic folder gives its name; an area's memory folder itself gives "<area> memory".
-    title = topic[-1] if len(topic) == _TOPIC_DEPTH else " ".join(topic)
+    title = topic[-1] if spot.is_topic else " ".join(topic)
     return f"# {title}\n"
 
 
@@ -325,7 +346,24 @@ def master_entry(topic: tuple[str, ...], description: str) -> str:
     return f"- {master_link(topic)} — {description}"
 
 
+def main_link(topic: tuple[str, ...]) -> str:
+    """How the main index of memory links a memory topic's index, from ``<area>/memory``."""
+    return _memory_link(f"{topic[-1]}/{INDEX_FILE['memory']}")
+
+
+def main_entry(topic: tuple[str, ...], description: str) -> str:
+    return f"- {main_link(topic)} — {description}"
+
+
 NEW_MASTER_INDEX = "# Wiki master index\n\n## Topics\n"
+# The section of the main index of memory that lists the topics, before any section of notes.
+MAIN_TOPICS = "Topics"
+
+
+def new_main_index(topic: tuple[str, ...]) -> str:
+    """The main index of memory the server creates for a topic's line: ``# <area> memory``
+    and the section of topics."""
+    return new_index(IndexSpot("memory", topic[:2])) + f"\n## {MAIN_TOPICS}\n"
 
 
 def _newline(text: str) -> str:
@@ -382,6 +420,27 @@ def with_topic(text: str, entry: str) -> str:
         return with_entry(text, sections[0], entry)
     newline = _newline(text)
     return newline.join([*_lines(text), entry]) + newline
+
+
+def with_main_topic(text: str, entry: str) -> str:
+    """The main index of memory with ``entry`` as the last line of its section ``Topics``.
+
+    That section is matched ignoring case and stays where it is. When the index
+    has none, it is inserted before the first section, so that the topics come
+    before the notes; in an index without sections it ends the file.
+    """
+    lines = _lines(text)
+    found = headings(lines)
+    if _find_section(found, MAIN_TOPICS) is not None:
+        return with_entry(text, MAIN_TOPICS, entry)
+    first = next((line for line, level, _ in found if level == SECTION_LEVEL), None)
+    if first is None:
+        return with_entry(text, MAIN_TOPICS, entry)
+    head = lines[:first]
+    gap = [""] if head and head[-1].strip() else []
+    newline = _newline(text)
+    lines = [*head, *gap, f"## {MAIN_TOPICS}", "", entry, "", *lines[first:]]
+    return newline.join(lines) + newline
 
 
 # -- commits -----------------------------------------------------------
