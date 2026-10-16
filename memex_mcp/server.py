@@ -34,20 +34,65 @@ PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource"
 HEALTH_PATH = "/healthz"
 
 INSTRUCTIONS = """\
-memex is a shared memory of Markdown notes, organised in areas: your own personal
-area and, if you belong to the household, the shared area `household`. Use `search`
-to find notes (it returns short snippets), `read` to get one note in full, `list`
-to browse a folder, and `areas` to see which areas you can use. Notes under an
-`archive/` folder are historical: prefer current notes and treat archived ones as
-background."""
+memex is a long-term memory of Markdown notes about the person you talk with and their
+life: what they own and use, what they do and care about, their plans, habits and
+preferences, and the people around them. People usually have a personal area; people who
+live together may also share an area (`areas` lists the ones this person can use).
+`memory/` holds working notes, `wiki/` curated reference pages.
+
+At the start of a conversation, read the person's profile (`<area>/memory/profile.md`;
+`areas` names their area; if it names none, there is no profile to read) and the topic
+lists `<area>/memory/MEMORY.md` and `<area>/wiki/_master-index.md`.
+
+Check memex before answering whenever the person's own situation could change the
+answer, not only when they ask about themselves: things they own, use or plan (a car, a
+server, a trip; "What do you know about Unraid?" → search `Unraid`, then answer with
+their setup plus general knowledge), advice and recommendations (a recipe → their diet),
+people they mention, and anything they refer to as if you already knew it ("my server",
+"our trip"). Skip it when nothing personal could matter, such as translations,
+arithmetic or general facts with no link to their life.
+
+Search with the request's content words (names, products, topics), not words like "me"
+or "remember"; if nothing fits, try once more with other words or the other language,
+since notes are in German or English. Read a note only when its snippet is not enough.
+Never say you know nothing about something before searching.
+
+Use what you find where it changes the answer and leave out what does not; bring in
+another person's details only when the request involves them. Notes under `archive/` are
+historical: prefer current notes. memex may sit alongside other memory you have; it
+neither replaces nor duplicates it."""
 
 WRITE_INSTRUCTIONS = """
 
-You can write where you can read, below `<area>/memory/` and `<area>/wiki/`:
-`create` a note (call `index_sections` first to pick the section of its index),
-`append` to one, `edit` a passage of one, or `delete` one. Every write is saved as
-its own commit. Never write keys or access tokens into a note; a password the user
-asks you to note down is fine."""
+You can write where you can read, below `<area>/memory/` and `<area>/wiki/`; every write
+is its own commit. Write to `memory/`; change `wiki/` only when the person asks for it.
+
+If the person has a personal area but no profile yet, offer once per conversation to
+create one together: propose what their notes already tell, ask a few short questions,
+and write it after they agree. The profile holds short facts only (who they are, their
+home and what they own and use, habits such as diet, the people around them), no links
+to other notes, and stays under 300 words; when it grows, move details into a topic note
+and keep the core fact.
+
+When someone asks you to remember, change or forget something, do it now: search first,
+update the matching note instead of adding a duplicate, then say in one short sentence
+what you saved and where. When someone mentions in passing a fact that will still be
+true in months and would help later, offer in one short line to note it and write only
+after they agree. Do not save short-lived details, your own suggestions unless they
+adopted them, or guesses about them. When a saved fact is a core fact about the person,
+update the profile too.
+
+Put a note into the topic folder it belongs to (`<area>/memory/<topic>/`); a note
+without a clear topic, or one whose topic is not yet worth a folder, goes directly in
+`<area>/memory/`. Call `index_sections` before `create` to pick the section of its
+index.
+
+Facts about one person go in that person's area. A shared area is for what everyone in
+it shares (wifi, appliances, shared plans), and everyone in it can read it, so put
+nothing there that one person told you about themselves without their OK. Never write
+keys or access tokens; a password the user asks you to note down is fine. Health, money
+and similar sensitive details only when the person explicitly asks. For a changed fact,
+`edit` the line and keep the history ("now X, previously Y"); `delete` only when asked."""
 
 AREA_FILTER_HELP = "Search only this area, e.g. 'household'. Omit to search all your areas."
 PATH_HELP = "The note's path as search or list return it, e.g. 'household/memory/wifi.md'."
@@ -233,7 +278,8 @@ def build_mcp(
     @mcp.tool(name="areas", annotations=READ_ONLY)
     async def areas() -> Mapping[str, object]:
         """List the memory areas you can use: your own and, if you belong to the
-        household, the shared one."""
+        household, the shared one. `own` names your personal area, null when you
+        have none."""
         identity = _caller()
         return await _run(partial(memex.areas, identity))
 
@@ -277,17 +323,19 @@ def _add_write_tools(mcp: FastMCP, config: Config, memex: Memex) -> None:
             str | None,
             Field(
                 description=(
-                    "Only for the first note of a new wiki topic: what the topic holds, "
-                    "for the master index; one line of at most 300 characters."
+                    "Only for the first note of a new topic (index_sections says new_topic): "
+                    "what the topic holds, for the area's list of topics; one line of at "
+                    "most 300 characters."
                 )
             ),
         ] = None,
     ) -> Mapping[str, object]:
-        """Create a new note and add its line to its topic's index, in one commit.
+        """Create a new note and add its line to its index, in one commit.
 
         Refuses a path where a note exists. Notes in a `daily/` folder take no
         index line; every other note needs index_section and index_line, and the
-        first note of a new wiki topic also topic_description. Returns the commit,
+        first note of a new topic also topic_description, which adds the topic's line
+        to the main index of memory or the wiki's master index. Returns the commit,
         whether it was pushed, and the note's version.
         """
         identity = _caller()
@@ -348,8 +396,9 @@ def _add_write_tools(mcp: FastMCP, config: Config, memex: Memex) -> None:
         ],
     ) -> Mapping[str, object]:
         """Show the index a new note there would be listed in: its path, whether it exists
-        yet, its sections, and `new_topic`, true when the note would start a new wiki topic
-        and create then needs topic_description. A note in a `daily/` folder has no index."""
+        yet, its sections, and `new_topic`, true when the note would start a new topic in
+        memory or the wiki and create then needs topic_description. A note in a `daily/`
+        folder has no index."""
         identity = _caller()
         return await _run(partial(memex.index_sections, identity, path))
 

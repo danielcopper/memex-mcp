@@ -18,8 +18,8 @@ Each area holds two folders:
 
 A **topic** is a folder directly under `<area>/memory/` or `<area>/wiki/`, for example `alice/memory/homelab/` or
 `alice/wiki/networking/`. A topic may have subfolders; they belong to it. Notes directly in `<area>/memory/` belong to
-that folder itself, which then acts as a topic of its own. Wiki notes belong in a topic folder: memex-mcp creates none
-directly in `<area>/wiki/`, whose only index is the master index of topics, but notes already there can still be
+no topic; the main index lists them (see [Indexes](#indexes)). Wiki notes belong in a topic folder: memex-mcp creates
+none directly in `<area>/wiki/`, whose only index is the master index of topics, but notes already there can still be
 changed.
 
 Two folder names have a meaning wherever they appear:
@@ -33,6 +33,8 @@ note's title is its first level-one heading (`# DNS`) outside fenced code blocks
 ```text
 alice/
   memory/
+    MEMORY.md            main index: the topics, and the notes directly in memory/
+    profile.md           short facts about alice
     homelab/
       MEMORY.md          index of the topic
       dns.md
@@ -45,29 +47,36 @@ alice/
       dhcp.md
 household/
   memory/
-    MEMORY.md            index of household/memory itself
+    MEMORY.md            main index of household/memory
     wifi.md
 ```
+
+A person may keep a **profile** at `<area>/memory/profile.md`: short facts about them only (who they are, their home and
+what they own and use, habits, the people around them), no links to other notes, under 300 words. memex-mcp treats it as
+an ordinary note directly in `<area>/memory/`.
 
 ## Indexes
 
 Each topic has one index file: `MEMORY.md` in memory, `_index.md` in the wiki, in the topic folder. A note is listed in
-its topic's index, also when it lies in a subfolder of the topic; an index file in a subfolder is not used. Notes
-directly in `<area>/memory/` are listed in `<area>/memory/MEMORY.md`. An area's wiki also has
-`<area>/wiki/_master-index.md`, which lists its topics.
+its topic's index, also when it lies in a subfolder of the topic; an index file in a subfolder is not used.
+
+Memory and the wiki each have a list of the area's topics, one line per topic. In memory it is the **main index**
+`<area>/memory/MEMORY.md`, which also lists the notes directly in `<area>/memory/`; in the wiki it is the **master
+index** `<area>/wiki/_master-index.md`, which lists topics only.
 
 An index is split into **sections** by level-two headings (`## Services`). A section name is one line of at most 100
 characters, under the same character rules as a description (below). The lines of an index are list items in these
 formats:
 
-| Index        | Line                                                 | Example                                                   |
-| ------------ | ---------------------------------------------------- | --------------------------------------------------------- |
-| `MEMORY.md`  | `- [<path>](<path>) — <description>`                 | `- [network/vlan.md](network/vlan.md) — VLANs`            |
-| `_index.md`  | `- [[<name>]] — <description>`                       | `- [[dhcp]] — leases and reservations`                    |
-| master index | `- [[wiki/<topic>/_index\|<topic>]] — <description>` | `- [[wiki/networking/_index\|networking]] — home network` |
+| Index               | Line                                                       | Example                                                   |
+| ------------------- | ---------------------------------------------------------- | --------------------------------------------------------- |
+| `MEMORY.md`         | `- [<path>](<path>) — <description>`                       | `- [network/vlan.md](network/vlan.md) — VLANs`            |
+| `_index.md`         | `- [[<name>]] — <description>`                             | `- [[dhcp]] — leases and reservations`                    |
+| master index        | `- [[wiki/<topic>/_index\|<topic>]] — <description>`       | `- [[wiki/networking/_index\|networking]] — home network` |
+| main index, a topic | `- [<topic>/MEMORY.md](<topic>/MEMORY.md) — <description>` | `- [homelab/MEMORY.md](homelab/MEMORY.md) — servers`      |
 
-- In `MEMORY.md` the path is relative to the topic folder; a path with whitespace, parentheses or angle brackets goes in
-  angle brackets: `- [my note.md](<my note.md>) — …`.
+- In `MEMORY.md` the path is relative to the folder of the index; a path with whitespace, parentheses or angle brackets
+  goes in angle brackets: `- [my note.md](<my note.md>) — …`.
 - In `_index.md` the name is the note's file name without `.md`, the way Obsidian links it.
 - Master index links start at the area folder.
 - The description is one line of at most 300 characters; the limit counts the description alone, not the whole line. It
@@ -76,10 +85,23 @@ formats:
 
 **Adding a note.** Whoever creates a note adds its line in the same commit, at the end of a section they choose. A
 section whose name equals an existing one ignoring case is that section; a section that does not exist yet is added at
-the end of the index. When the topic has no index yet, the writer creates it with a heading naming the topic
-(`# networking`; for `<area>/memory/` itself, `# <area> memory`). For a new wiki topic, the writer also adds the topic's
-line, with a description of the topic, at the end of the master index's first section (at the end of the file when it
-has no section), and creates the master index (`# Wiki master index` with a section `## Topics`) if it is missing.
+the end of the index. When the note's index does not exist yet, the writer creates it with a heading: a topic's index is
+headed by the topic's name (`# networking`), the main index by `# <area> memory`. A note directly in `<area>/memory/`
+cannot use the section `Topics` (in any letter case), which lists the topics.
+
+**Adding a topic.** The first note of a new topic, a topic folder (not `<area>/memory/` itself) that has no index yet,
+also brings a description of the topic, and the writer adds the topic's line in the same commit:
+
+- In memory, at the end of the main index's section `## Topics` (matched ignoring case), which the writer places before
+  the sections of notes. When the main index has no such section, the writer inserts it after the heading and any text
+  before the first section, or at the end of an index without sections; an existing `## Topics` stays where it is. A
+  missing main index is created as `# <area> memory` with a section `## Topics`.
+- In the wiki, at the end of the master index's first section (at the end of the file when it has no section). A missing
+  master index is created as `# Wiki master index` with a section `## Topics`.
+
+When the list already holds the exact link the writer would add (`[<topic>/MEMORY.md](<topic>/MEMORY.md)` or
+`[[wiki/<topic>/_index|<topic>]]`), the writer adds no second line. `<area>/memory/archive/` is a topic like any other;
+notes in `daily/` take no index line, so a `daily/` folder never starts a topic.
 
 Reordering, rewording and removing index lines are left to a cleanup run started by a person. Deleting a note leaves its
 line in place until then.
@@ -108,8 +130,8 @@ new note.
   open the folder. memex-mcp never creates, changes or deletes them, nor a folder of such a name, in any letter case and
   also with trailing dots or spaces.
 - Index files (`MEMORY.md`, `_index.md`, `_master-index.md`) change only through creating a note, which adds the note's
-  line and, when needed, creates the index, a section or the topic's master index line; and through cleanup. memex-mcp
-  treats these names like the protected ones: in any letter case, and as folder names too.
+  line and, when needed, creates the index, a section or the topic's line in the main index or the master index; and
+  through cleanup. memex-mcp treats these names like the protected ones: in any letter case, and as folder names too.
 
 ## Commits
 
@@ -158,6 +180,7 @@ line in the commit that creates the note. Every other rule holds only for writes
 | No hidden files, no symlinks                                                           | enforced                         | —                     |
 | Protected files and index files                                                        | enforced                         | —                     |
 | New wiki notes only in a topic folder                                                  | enforced                         | —                     |
+| No note directly in `<area>/memory/` under the section `Topics`                        | enforced                         | —                     |
 | A note at most 64 KiB after a write (`write.max_note_bytes`)                           | enforced                         | —                     |
 | No machine secrets (private keys, access tokens) in written text or paths              | enforced                         | —                     |
 | Index texts and paths without control or format characters, `<!--` or a word-start `@` | enforced                         | —                     |

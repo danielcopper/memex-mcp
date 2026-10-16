@@ -20,8 +20,8 @@ names ``CLAUDE.md``, ``CLAUDE.local.md`` or ``AGENTS.md`` in any letter case,
 as a file or as a folder; no write names an index file (``MEMORY.md``,
 ``_index.md``, ``_master-index.md``) either, since indexes change only
 through ``create``, which adds a new note's line and creates the index, a
-section or the master index line when needed; and no write follows a symlink
-anywhere on its path.
+section or the topic's line in the main index of memory or the wiki's master
+index when needed; and no write follows a symlink anywhere on its path.
 """
 
 from __future__ import annotations
@@ -41,8 +41,9 @@ WRITABLE_FOLDERS = frozenset({"memory", "wiki"})
 # Loaded by assistants (Claude Code and others) that open the folder: never written through
 # the server. Compared ignoring case, against every segment of a path.
 PROTECTED_NAMES = frozenset({"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"})
-# Changed only by create: a new note's line, and the index, a section or the master index
-# line when needed. Compared like PROTECTED_NAMES.
+# Changed only by create: a new note's line, and the index, a section or the topic's line
+# in the main index of memory or the wiki's master index when needed. Compared like
+# PROTECTED_NAMES.
 INDEX_NAMES = frozenset({"MEMORY.md", "_index.md", "_master-index.md"})
 _PROTECTED_FOLDED = frozenset(name.casefold() for name in PROTECTED_NAMES)
 _INDEX_FOLDED = frozenset(name.casefold() for name in INDEX_NAMES)
@@ -113,7 +114,7 @@ class Policy:
         if self.access_group not in identity.groups:
             raise AccessDenied(ACCESS_DENIED)
         areas: set[str] = set()
-        own = self.users.get(identity.username)
+        own = self.own_area(identity)
         if own is not None:
             areas.add(own)
         if self.household_group in identity.groups:
@@ -121,6 +122,13 @@ class Policy:
         if not areas:
             raise AccessDenied(ACCESS_DENIED)
         return frozenset(areas)
+
+    def own_area(self, identity: Identity) -> str | None:
+        """The identity's personal area, None when its username maps to none.
+
+        Says nothing about access: callers ask ``areas_for`` first.
+        """
+        return self.users.get(identity.username)
 
     def may_write(
         self, identity: Identity, parts: tuple[str, ...], operation: WriteOperation
