@@ -465,7 +465,7 @@ class Memex:
         content: str,
         listing: IndexLine | None = None,
     ) -> WriteResult:
-        """A new note plus its line in its topic's index; daily notes take no index line.
+        """A new note plus its line in its index; daily notes take no index line.
 
         The first note of a new topic also needs ``listing.topic``, the topic's
         line in the master index of the wiki or the main index of memory.
@@ -597,7 +597,7 @@ class Memex:
         return decode(file.read_bytes()) if file.exists() else None
 
     def _find_index(self, spot: IndexSpot) -> tuple[tuple[str, ...], str | None]:
-        """The topic's index and its text, None while the topic has none."""
+        """The index at ``spot`` and its text, None while there is none."""
         parts = (*spot.topic, spot.name)
         return parts, self._index_file(parts)
 

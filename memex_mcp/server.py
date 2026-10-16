@@ -330,7 +330,7 @@ def _add_write_tools(mcp: FastMCP, config: Config, memex: Memex) -> None:
             ),
         ] = None,
     ) -> Mapping[str, object]:
-        """Create a new note and add its line to its topic's index, in one commit.
+        """Create a new note and add its line to its index, in one commit.
 
         Refuses a path where a note exists. Notes in a `daily/` folder take no
         index line; every other note needs index_section and index_line, and the

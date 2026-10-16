@@ -151,10 +151,12 @@ def is_daily(parts: tuple[str, ...]) -> bool:
 
 @dataclass(frozen=True)
 class IndexSpot:
-    """The index a new note goes into: the one of its topic, by kind."""
+    """The index a new note goes into: its topic's, or, for a note directly in
+    ``<area>/memory/``, the main index of memory."""
 
     folder: Folder
-    # The topic folder: <area>/<folder>/<topic>, or <area>/memory itself.
+    # The folder of that index: a topic folder <area>/<folder>/<topic>, or <area>/memory
+    # itself for the main index, which is no topic.
     topic: tuple[str, ...]
 
     @property
@@ -180,12 +182,13 @@ def is_new_topic(spot: IndexSpot, index: str | None) -> bool:
 
 
 def index_spot(parts: tuple[str, ...]) -> IndexSpot:
-    """The topic whose index a new note at ``parts`` is listed in.
+    """The folder whose index a new note at ``parts`` is listed in.
 
-    The topic is the folder directly under ``<area>/memory/`` or
+    A note's topic is the folder directly under ``<area>/memory/`` or
     ``<area>/wiki/``: a note in a subfolder of a topic is listed in the
     topic's index, whatever index files the subfolders hold. A note directly
-    in ``<area>/memory/`` is listed in ``<area>/memory/MEMORY.md``; one
+    in ``<area>/memory/`` has no topic and is listed in the main index
+    ``<area>/memory/MEMORY.md``; one
     directly in ``<area>/wiki/`` is refused, since the master index there
     lists topics, not notes. ``parts`` passed ``Policy.may_write``.
     """
@@ -312,7 +315,7 @@ def _link_target(relative: str) -> str:
 def index_entry(
     folder: Folder, note: tuple[str, ...], topic: tuple[str, ...], description: str
 ) -> str:
-    """The index line for ``note`` in its topic's index, in that index's format.
+    """The line for ``note`` in the index of ``topic``, in that index's format.
 
     Memory: ``- [<path>](<path>) — <description>``, the path relative to the
     index. Wiki: ``- [[<name>]] — <description>``, the note's name without
