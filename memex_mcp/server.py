@@ -233,7 +233,8 @@ def build_mcp(
     @mcp.tool(name="areas", annotations=READ_ONLY)
     async def areas() -> Mapping[str, object]:
         """List the memory areas you can use: your own and, if you belong to the
-        household, the shared one."""
+        household, the shared one. `own` names your personal area, null when you
+        have none."""
         identity = _caller()
         return await _run(partial(memex.areas, identity))
 

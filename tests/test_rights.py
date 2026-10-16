@@ -149,4 +149,6 @@ def test_areas_lists_exactly_the_callers_areas(memex: Memex, identity: Identity)
         with pytest.raises(AccessDenied, match=ACCESS_DENIED):
             memex.areas(identity)
         return
-    assert memex.areas(identity) == {"areas": sorted(expected)}
+    # The personal area is the one the username maps to; the guest reaches only the shared one.
+    own = None if identity.username == "guest" else identity.username
+    assert memex.areas(identity) == {"areas": sorted(expected), "own": own}

@@ -174,6 +174,8 @@ class SectionsResult(TypedDict):
 
 class AreasResult(TypedDict):
     areas: list[str]
+    # The caller's personal area; None for a caller who reaches only the shared one.
+    own: str | None
 
 
 class Entry(TypedDict):
@@ -433,7 +435,8 @@ class Memex:
 
     def areas(self, identity: Identity) -> AreasResult:
         """The caller's own areas, and nothing about anyone else's."""
-        return {"areas": sorted(self.policy.areas_for(identity))}
+        areas = self.policy.areas_for(identity)
+        return {"areas": sorted(areas), "own": self.policy.own_area(identity)}
 
     def list(self, identity: Identity, area: str, folder: str | None = None) -> ListResult:
         areas = self.policy.areas_for(identity)

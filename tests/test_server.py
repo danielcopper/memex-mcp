@@ -245,10 +245,19 @@ async def test_areas_tool_answers_the_callers_areas_only(tmp_path: Path, origin:
     async with serve(tmp_path, origin) as client:
         bob = await call(client, token(preferred_username="bob"), "areas")
         assert bob["isError"] is False
-        assert bob["structuredContent"] == {"areas": ["bob", "household"]}
+        assert bob["structuredContent"] == {"areas": ["bob", "household"], "own": "bob"}
         outsider = await call(client, token(groups=["household"]), "areas")
         assert outsider["isError"] is True
         assert outsider["content"][0]["text"] == ACCESS_DENIED
+
+
+@pytest.mark.anyio
+async def test_areas_answers_null_for_a_caller_without_a_personal_area(
+    tmp_path: Path, origin: Origin
+) -> None:
+    async with serve(tmp_path, origin) as client:
+        guest = await call(client, token(preferred_username="guest"), "areas")
+        assert guest["structuredContent"] == {"areas": ["household"], "own": None}
 
 
 def break_remote(memex: Memex, origin: Origin) -> None:

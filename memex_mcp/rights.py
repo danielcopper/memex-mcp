@@ -114,7 +114,7 @@ class Policy:
         if self.access_group not in identity.groups:
             raise AccessDenied(ACCESS_DENIED)
         areas: set[str] = set()
-        own = self.users.get(identity.username)
+        own = self.own_area(identity)
         if own is not None:
             areas.add(own)
         if self.household_group in identity.groups:
@@ -122,6 +122,13 @@ class Policy:
         if not areas:
             raise AccessDenied(ACCESS_DENIED)
         return frozenset(areas)
+
+    def own_area(self, identity: Identity) -> str | None:
+        """The identity's personal area, None when its username maps to none.
+
+        Says nothing about access: callers ask ``areas_for`` first.
+        """
+        return self.users.get(identity.username)
 
     def may_write(
         self, identity: Identity, parts: tuple[str, ...], operation: WriteOperation
