@@ -575,7 +575,8 @@ def test_a_note_in_the_main_index_cannot_take_the_section_of_topics(
     memex: Memex, remote: Remote
 ) -> None:
     head = remote.head()
-    for section in ("Topics", "topics", "## TOPICS"):
+    # Closing hashes are stripped when the heading is read, so they name Topics too.
+    for section in ("Topics", "topics", "## TOPICS", "Topics #", "Topics ##"):
         listing = IndexLine(section, LINE)
         call = partial(memex.create, ALICE, "alice/memory/bikes.md", "# Bikes\n", listing)
         # The whole message: it names no area or path.

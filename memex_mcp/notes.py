@@ -334,7 +334,7 @@ def _memory_link(relative: str) -> str:
 
 
 def new_index(spot: IndexSpot) -> str:
-    """The heading of an index the server creates for a topic that has none."""
+    """The heading of an index the server creates for a folder whose index is missing."""
     topic = spot.topic
     # A topic folder gives its name; an area's memory folder itself gives "<area> memory".
     title = topic[-1] if spot.is_topic else " ".join(topic)
@@ -427,9 +427,14 @@ def with_topic(text: str, entry: str) -> str:
 
 
 def check_note_section(spot: IndexSpot, section: str) -> None:
-    """Refuse the section of topics for a note listed in the main index of memory."""
+    """Refuse the section of topics for a note listed in the main index of memory.
+
+    The name is compared as the heading ``## <section>`` reads, closing hashes
+    stripped, the way the index's sections are found.
+    """
     in_main = spot.folder == "memory" and not spot.is_topic
-    if in_main and section.casefold() == MAIN_TOPICS.casefold():
+    read_as = headings([f"## {section}"])[0][2]
+    if in_main and read_as.casefold() == MAIN_TOPICS.casefold():
         raise InvalidRequest(TOPICS_SECTION_TAKEN)
 
 
