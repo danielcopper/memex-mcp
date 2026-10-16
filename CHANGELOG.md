@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/danielcopper/memex-mcp/compare/v0.4.0...v0.5.0) (2026-10-16)
+
+
+### Features
+
+* a main index for memory, and instructions on when to read and write ([#30](https://github.com/danielcopper/memex-mcp/issues/30)) ([45e81cd](https://github.com/danielcopper/memex-mcp/commit/45e81cd3d433c3073e45b866f66706d7d79060b9)), closes [#29](https://github.com/danielcopper/memex-mcp/issues/29)
+
 ## [0.4.0](https://github.com/danielcopper/memex-mcp/compare/v0.3.0...v0.4.0) (2026-10-15)
 
 
