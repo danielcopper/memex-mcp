@@ -20,11 +20,15 @@ from memex_mcp.notes import (
     index_entry,
     index_spot,
     is_daily,
+    is_new_topic,
+    main_entry,
     master_entry,
     new_index,
+    new_main_index,
     section_names,
     version_of,
     with_entry,
+    with_main_topic,
     with_topic,
 )
 from memex_mcp.rights import InvalidRequest
@@ -152,6 +156,21 @@ def test_index_lines_follow_the_format_of_their_index() -> None:
     assert master_entry(("alice", "wiki", "networking"), "the home network") == (
         "- [[wiki/networking/_index|networking]] — the home network"
     )
+    assert main_entry(("alice", "memory", "homelab"), "servers and network") == (
+        "- [homelab/MEMORY.md](homelab/MEMORY.md) — servers and network"
+    )
+    assert main_entry(("alice", "memory", "my garden"), "d") == (
+        "- [my garden/MEMORY.md](<my garden/MEMORY.md>) — d"
+    )
+
+
+def test_a_new_topic_is_a_topic_folder_without_its_index() -> None:
+    for parts in (("alice", "memory", "garden", "x.md"), ("alice", "wiki", "cooking", "x.md")):
+        spot = index_spot(parts)
+        assert is_new_topic(spot, None) is True
+        assert is_new_topic(spot, "# garden\n") is False
+    # An area's memory folder is not a topic, with or without its index.
+    assert is_new_topic(index_spot(("alice", "memory", "x.md")), None) is False
 
 
 def test_a_new_index_is_headed_by_its_topic() -> None:
@@ -333,6 +352,39 @@ def test_the_master_line_goes_to_the_end_of_the_first_section() -> None:
         "# Wiki\n\n## Topics\n\n- [[wiki/a/_index|a]] — a\n- new\n\n## Other\n\n- x\n"
     )
     assert with_topic("# Wiki\n\n- [[a]]\n", "- new") == "# Wiki\n\n- [[a]]\n- new\n"
+
+
+def test_the_topics_section_of_the_main_index_comes_before_the_notes() -> None:
+    # Missing: inserted after the heading and the text before the first section.
+    main = "# alice memory\n\nWhat I keep.\n\n## Bikes\n\n- [bike.md](bike.md) — bike\n"
+    assert with_main_topic(main, "- new") == (
+        "# alice memory\n\nWhat I keep.\n\n## Topics\n\n- new\n\n"
+        "## Bikes\n\n- [bike.md](bike.md) — bike\n"
+    )
+    crlf = main.replace("\n", "\r\n")
+    assert with_main_topic(crlf, "- new") == with_main_topic(main, "- new").replace("\n", "\r\n")
+    # Without any section, it ends the index.
+    assert with_main_topic("# alice memory\n\n- [a.md](a.md) — a\n", "- new") == (
+        "# alice memory\n\n- [a.md](a.md) — a\n\n## Topics\n\n- new\n"
+    )
+
+
+def test_an_inserted_topics_section_is_set_off_by_a_blank_line() -> None:
+    main = "# alice memory\n## Bikes\n- b\n"
+    assert with_main_topic(main, "- new") == (
+        "# alice memory\n\n## Topics\n\n- new\n\n## Bikes\n- b\n"
+    )
+
+
+def test_an_existing_topics_section_stays_where_it_is() -> None:
+    main = "# alice memory\n\n## Bikes\n\n- b\n\n## topics\n\n- [a/MEMORY.md](a/MEMORY.md) — a\n"
+    assert with_main_topic(main, "- new") == main + "- new\n"
+
+
+def test_a_new_main_index_starts_with_its_topics() -> None:
+    created = new_main_index(("alice", "memory", "garden"))
+    assert created == "# alice memory\n\n## Topics\n"
+    assert with_main_topic(created, "- new") == "# alice memory\n\n## Topics\n\n- new\n"
 
 
 @pytest.mark.parametrize(

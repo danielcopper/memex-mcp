@@ -31,12 +31,12 @@ from memex_mcp.embed import Embedder, EmbeddingError
 from memex_mcp.index import ChunkRow, Index, is_archived, query_words
 from memex_mcp.markdown import title_of
 from memex_mcp.notes import (
-    MASTER_INDEX,
     NEW_MASTER_INDEX,
     Action,
     IndexSpot,
     appended,
     check_composed,
+    check_note_section,
     check_secrets,
     check_size,
     check_version,
@@ -49,14 +49,19 @@ from memex_mcp.notes import (
     index_entry,
     index_spot,
     is_daily,
+    is_new_topic,
+    main_entry,
+    main_link,
     master_entry,
     master_link,
     new_index,
+    new_main_index,
     new_note,
     section_names,
     version_of,
     with_client,
     with_entry,
+    with_main_topic,
     with_topic,
 )
 from memex_mcp.repo import CONFLICT_PREFIX, WRITER, Author, GitError, GitRepo, Push
@@ -164,12 +169,14 @@ class SectionsResult(TypedDict):
     index: str | None
     exists: bool
     sections: list[str]
-    # The index is a new wiki topic's: create then also needs topic_description.
+    # The note would start a new topic: create then also needs topic_description.
     new_topic: bool
 
 
 class AreasResult(TypedDict):
     areas: list[str]
+    # The caller's personal area; None for a caller who reaches only the shared one.
+    own: str | None
 
 
 class Entry(TypedDict):
@@ -202,7 +209,8 @@ class _Change:
 @dataclass(frozen=True)
 class IndexLine:
     """How create lists a new note: the section of its index, the note's line there,
-    and, for the first note of a new wiki topic, the topic's line in the master index."""
+    and, for the first note of a new topic, the topic's line in the area's list of topics
+    (the master index of the wiki, the main index of memory)."""
 
     section: str | None = None
     line: str | None = None
@@ -428,7 +436,8 @@ class Memex:
 
     def areas(self, identity: Identity) -> AreasResult:
         """The caller's own areas, and nothing about anyone else's."""
-        return {"areas": sorted(self.policy.areas_for(identity))}
+        areas = self.policy.areas_for(identity)
+        return {"areas": sorted(areas), "own": self.policy.own_area(identity)}
 
     def list(self, identity: Identity, area: str, folder: str | None = None) -> ListResult:
         areas = self.policy.areas_for(identity)
@@ -456,10 +465,10 @@ class Memex:
         content: str,
         listing: IndexLine | None = None,
     ) -> WriteResult:
-        """A new note plus its line in its topic's index; daily notes take no index line.
+        """A new note plus its line in its index; daily notes take no index line.
 
-        The first note of a new wiki topic also needs ``listing.topic``, the
-        topic's line in the master index.
+        The first note of a new topic also needs ``listing.topic``, the topic's
+        line in the master index of the wiki or the main index of memory.
         """
         texts = listing or IndexLine()
 
@@ -524,7 +533,7 @@ class Memex:
             "index": "/".join(index_parts),
             "exists": current is not None,
             "sections": section_names(current or ""),
-            "new_topic": current is None and spot.folder == "wiki",
+            "new_topic": is_new_topic(spot, current),
         }
 
     def _plan_create(
@@ -543,8 +552,9 @@ class Memex:
         index_parts, current = self._find_index(spot)
         sections = section_names(current or "")
         section = checked_section(texts.section, sections)
+        check_note_section(spot, section)
         line = checked_line(texts.line, sections)
-        new_topic = current is None and spot.folder == "wiki"
+        new_topic = is_new_topic(spot, current)
         topic = ""
         if new_topic:
             topic = checked_topic(texts.topic)
@@ -559,7 +569,7 @@ class Memex:
             _Change("create" if current is None else "update", index_path, text.encode()),
         ]
         if new_topic:
-            changes += self._master_change(spot, topic)
+            changes += self._topic_list_change(spot, topic)
         return _Plan(changes=tuple(changes), version=version_of(data), index=index_path)
 
     def _plan_change(self, action: Action, parts: tuple[str, ...], data: bytes) -> _Plan:
@@ -587,22 +597,29 @@ class Memex:
         return decode(file.read_bytes()) if file.exists() else None
 
     def _find_index(self, spot: IndexSpot) -> tuple[tuple[str, ...], str | None]:
-        """The topic's index and its text, None while the topic has none."""
+        """The index at ``spot`` and its text, None while there is none."""
         parts = (*spot.topic, spot.name)
         return parts, self._index_file(parts)
 
-    def _master_change(self, spot: IndexSpot, description: str) -> list[_Change]:
-        """The master index's line for a wiki topic whose index is new, unless it has one.
+    def _topic_list_change(self, spot: IndexSpot, description: str) -> list[_Change]:
+        """For a topic whose own index is new: its line in the area's list of topics (the
+        wiki's master index or the main index of memory), unless that list has it already.
 
-        The line goes to the end of the master index's first section.
+        In the master index, the line goes to the end of its first section; in the main
+        index, to the end of its section ``Topics``.
         """
-        parts = (*spot.topic[:2], MASTER_INDEX)
+        parts = spot.topic_list
         current = self._index_file(parts)
-        if current is not None and master_link(spot.topic) in current:
-            return []
         # The topic's name was checked in the new index's heading, the description on its own.
-        entry = master_entry(spot.topic, description)
-        text = with_topic(NEW_MASTER_INDEX if current is None else current, entry)
+        if spot.folder == "wiki":
+            link, entry = master_link(spot.topic), master_entry(spot.topic, description)
+            new_list, place = NEW_MASTER_INDEX, with_topic
+        else:
+            link, entry = main_link(spot.topic), main_entry(spot.topic, description)
+            new_list, place = new_main_index(spot.topic), with_main_topic
+        if current is not None and link in current:
+            return []
+        text = place(new_list if current is None else current, entry)
         action: Action = "create" if current is None else "update"
         return [_Change(action, "/".join(parts), text.encode())]
 
