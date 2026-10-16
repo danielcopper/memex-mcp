@@ -36,13 +36,13 @@ HEALTH_PATH = "/healthz"
 INSTRUCTIONS = """\
 memex is a long-term memory of Markdown notes about the person you talk with and their
 life: what they own and use, what they do and care about, their plans, habits and
-preferences, and the people around them. Each person has a personal area; people who
+preferences, and the people around them. People usually have a personal area; people who
 live together may also share an area (`areas` lists the ones this person can use).
 `memory/` holds working notes, `wiki/` curated reference pages.
 
 At the start of a conversation, read the person's profile (`<area>/memory/profile.md`;
-`areas` names their area) and the topic lists `<area>/memory/MEMORY.md` and
-`<area>/wiki/_master-index.md`.
+`areas` names their area; if it names none, there is no profile to read) and the topic
+lists `<area>/memory/MEMORY.md` and `<area>/wiki/_master-index.md`.
 
 Check memex before answering whenever the person's own situation could change the
 answer, not only when they ask about themselves: things they own, use or plan (a car, a
@@ -67,12 +67,12 @@ WRITE_INSTRUCTIONS = """
 You can write where you can read, below `<area>/memory/` and `<area>/wiki/`; every write
 is its own commit. Write to `memory/`; change `wiki/` only when the person asks for it.
 
-If the person has no profile yet, offer once per conversation to create one together:
-propose what their notes already tell, ask a few short questions, and write it after
-they agree. The profile holds short facts only (who they are, their home and what they
-own and use, habits such as diet, the people around them), no links to other notes, and
-stays under 300 words; when it grows, move details into a topic note and keep the core
-fact.
+If the person has a personal area but no profile yet, offer once per conversation to
+create one together: propose what their notes already tell, ask a few short questions,
+and write it after they agree. The profile holds short facts only (who they are, their
+home and what they own and use, habits such as diet, the people around them), no links
+to other notes, and stays under 300 words; when it grows, move details into a topic note
+and keep the core fact.
 
 When someone asks you to remember, change or forget something, do it now: search first,
 update the matching note instead of adding a duplicate, then say in one short sentence
