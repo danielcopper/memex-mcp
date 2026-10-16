@@ -570,6 +570,22 @@ def test_the_topics_go_before_the_notes_of_the_main_index(
     )
 
 
+def test_a_note_in_the_main_index_cannot_take_the_section_of_topics(
+    memex: Memex, remote: Remote
+) -> None:
+    head = remote.head()
+    for section in ("Topics", "topics", "## TOPICS"):
+        with pytest.raises(
+            InvalidRequest, match="^the section Topics lists topics; choose another"
+        ):
+            memex.create(ALICE, "alice/memory/bikes.md", "# Bikes\n", IndexLine(section, LINE))
+    assert remote.head() == head
+    # In a topic's own index, a section of that name is an ordinary one.
+    listing = IndexLine("Topics", LINE, "beds")
+    memex.create(ALICE, "alice/memory/garden/roses.md", "# Roses\n", listing)
+    assert "## Topics\n\n- [roses.md](roses.md)" in remote.show("alice/memory/garden/MEMORY.md")
+
+
 def test_an_archive_folder_in_memory_is_a_topic_like_any_other(
     memex: Memex, remote: Remote
 ) -> None:

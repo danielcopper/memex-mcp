@@ -42,6 +42,7 @@ _TOPIC_DEPTH = 3
 CLIENT_TRAILER = "Memex-Client"
 
 CHANGED_SINCE_READ = "the note changed since you read it; read it again"
+TOPICS_SECTION_TAKEN = "the section Topics lists topics; choose another section for the note"
 MISSING_TOPIC = (
     "the first note of a new topic needs topic_description, one line that says "
     "what the topic holds, for the area's list of topics"
@@ -420,6 +421,13 @@ def with_topic(text: str, entry: str) -> str:
         return with_entry(text, sections[0], entry)
     newline = _newline(text)
     return newline.join([*_lines(text), entry]) + newline
+
+
+def check_note_section(spot: IndexSpot, section: str) -> None:
+    """Refuse the section of topics for a note listed in the main index of memory."""
+    in_main = spot.folder == "memory" and not spot.is_topic
+    if in_main and section.casefold() == MAIN_TOPICS.casefold():
+        raise InvalidRequest(TOPICS_SECTION_TAKEN)
 
 
 def with_main_topic(text: str, entry: str) -> str:

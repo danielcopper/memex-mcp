@@ -36,6 +36,7 @@ from memex_mcp.notes import (
     IndexSpot,
     appended,
     check_composed,
+    check_note_section,
     check_secrets,
     check_size,
     check_version,
@@ -551,6 +552,7 @@ class Memex:
         index_parts, current = self._find_index(spot)
         sections = section_names(current or "")
         section = checked_section(texts.section, sections)
+        check_note_section(spot, section)
         line = checked_line(texts.line, sections)
         new_topic = is_new_topic(spot, current)
         topic = ""
