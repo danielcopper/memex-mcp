@@ -437,9 +437,40 @@ async def test_with_writing_on_the_instructions_name_the_write_tools(
             },
             bearer=token(),
         )
-        instructions = cast("str", initialized.json()["result"]["instructions"])
-        assert "`create` a note" in instructions
+        instructions = " ".join(cast("str", initialized.json()["result"]["instructions"]).split())
+        assert "`index_sections` before `create`" in instructions
+        assert "`edit` the line" in instructions
+        assert "`delete` only when asked" in instructions
         assert "a password the user" in instructions
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("write", [True, False], ids=["writing-on", "writing-off"])
+async def test_the_instructions_name_the_profile_and_both_topic_lists(
+    tmp_path: Path, origin: Origin, write: bool
+) -> None:
+    async with serving(tmp_path, origin, write=write) as (client, _memex):
+        initialized = await rpc(
+            client,
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"},
+            },
+            bearer=token(),
+        )
+        instructions = " ".join(cast("str", initialized.json()["result"]["instructions"]).split())
+        # What to read at the start of a conversation, whether writing is on or off.
+        for path in (
+            "`<area>/memory/profile.md`",
+            "`<area>/memory/MEMORY.md`",
+            "`<area>/wiki/_master-index.md`",
+        ):
+            assert path in instructions
+        # When and where to write, only with writing on.
+        assert ("Write to `memory/`" in instructions) is write
+        assert ("offer once per conversation" in instructions) is write
 
 
 @pytest.mark.anyio
