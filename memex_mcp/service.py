@@ -602,8 +602,8 @@ class Memex:
         return parts, self._index_file(parts)
 
     def _topic_list_change(self, spot: IndexSpot, description: str) -> list[_Change]:
-        """The line for a topic whose index is new in the area's list of topics (the
-        wiki's master index or the main index of memory), unless the list has it already.
+        """For a topic whose own index is new: its line in the area's list of topics (the
+        wiki's master index or the main index of memory), unless that list has it already.
 
         In the master index, the line goes to the end of its first section; in the main
         index, to the end of its section ``Topics``.

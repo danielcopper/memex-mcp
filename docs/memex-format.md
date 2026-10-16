@@ -85,9 +85,9 @@ formats:
 
 **Adding a note.** Whoever creates a note adds its line in the same commit, at the end of a section they choose. A
 section whose name equals an existing one ignoring case is that section; a section that does not exist yet is added at
-the end of the index. When the note's index does not exist yet, the writer creates it with a heading naming the topic
-(`# networking`; for the main index, `# <area> memory`). A note directly in `<area>/memory/` cannot use the section
-`Topics` (in any letter case), which lists the topics.
+the end of the index. When the note's index does not exist yet, the writer creates it with a heading: a topic's index is
+headed by the topic's name (`# networking`), the main index by `# <area> memory`. A note directly in `<area>/memory/`
+cannot use the section `Topics` (in any letter case), which lists the topics.
 
 **Adding a topic.** The first note of a new topic, a topic folder (not `<area>/memory/` itself) that has no index yet,
 also brings a description of the topic, and the writer adds the topic's line in the same commit:
