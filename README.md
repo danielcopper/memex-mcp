@@ -100,8 +100,8 @@ the answer a missing one gets, so the server does not reveal what other people h
 **Tools.**
 
 The server's instructions tell assistants to read the person's profile (`<area>/memory/profile.md`) and the topic lists
-(`<area>/memory/MEMORY.md`, `<area>/wiki/_master-index.md`) at the start of a conversation and, with writing on, to
-offer to create a missing profile.
+(`<area>/memory/MEMORY.md`, `<area>/wiki/_master-index.md`) once per conversation, the first time the person's own
+situation could change the answer (not for a greeting), and, with writing on, to offer to create a missing profile.
 
 The write tools and `index_sections` exist only with `write.enabled` on.
 
