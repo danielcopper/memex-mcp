@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/danielcopper/memex-mcp/compare/v0.5.0...v0.5.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* **server:** read the profile only when memex is worth checking ([#33](https://github.com/danielcopper/memex-mcp/issues/33)) ([2c40ab8](https://github.com/danielcopper/memex-mcp/commit/2c40ab8aab21625ad518f28029049f3ad1ba2572)), closes [#32](https://github.com/danielcopper/memex-mcp/issues/32)
+
 ## [0.5.0](https://github.com/danielcopper/memex-mcp/compare/v0.4.0...v0.5.0) (2026-10-16)
 
 
