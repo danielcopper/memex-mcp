@@ -40,10 +40,6 @@ preferences, and the people around them. People usually have a personal area; pe
 live together may also share an area (`areas` lists the ones this person can use).
 `memory/` holds working notes, `wiki/` curated reference pages.
 
-At the start of a conversation, read the person's profile (`<area>/memory/profile.md`;
-`areas` names their area; if it names none, there is no profile to read) and the topic
-lists `<area>/memory/MEMORY.md` and `<area>/wiki/_master-index.md`.
-
 Check memex before answering whenever the person's own situation could change the
 answer, not only when they ask about themselves: things they own, use or plan (a car, a
 server, a trip; "What do you know about Unraid?" → search `Unraid`, then answer with
@@ -51,6 +47,12 @@ their setup plus general knowledge), advice and recommendations (a recipe → th
 people they mention, and anything they refer to as if you already knew it ("my server",
 "our trip"). Skip it when nothing personal could matter, such as translations,
 arithmetic or general facts with no link to their life.
+
+The first time in a conversation that memex is worth checking, read the person's profile
+(`<area>/memory/profile.md`; `areas` names their area; if it names none, there is no
+profile to read) and the topic lists `<area>/memory/MEMORY.md` and
+`<area>/wiki/_master-index.md` before you search. Read them once per conversation, and
+not for a greeting or a request where nothing personal could matter.
 
 Search with the request's content words (names, products, topics), not words like "me"
 or "remember"; if nothing fits, try once more with other words or the other language,

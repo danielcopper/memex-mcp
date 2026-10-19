@@ -461,13 +461,19 @@ async def test_the_instructions_name_the_profile_and_both_topic_lists(
             bearer=token(),
         )
         instructions = " ".join(cast("str", initialized.json()["result"]["instructions"]).split())
-        # What to read at the start of a conversation, whether writing is on or off.
+        # What to read the first time memex is worth checking, not at the start of every
+        # conversation, whether writing is on or off.
         for path in (
             "`<area>/memory/profile.md`",
             "`<area>/memory/MEMORY.md`",
             "`<area>/wiki/_master-index.md`",
         ):
             assert path in instructions
+        assert "At the start of a conversation" not in instructions
+        assert "The first time in a conversation that memex is worth checking" in instructions
+        assert "not for a greeting" in instructions
+        assert "Read them once per conversation" in instructions
+        assert "before you search" in instructions
         # When and where to write, only with writing on.
         assert ("Write to `memory/`" in instructions) is write
         assert ("offer once per conversation" in instructions) is write
