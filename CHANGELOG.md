@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/danielcopper/memex-mcp/compare/v0.5.1...v0.6.0) (2026-10-20)
+
+
+### Features
+
+* **embed:** keep the embedding model loaded with a configurable keep_alive ([#36](https://github.com/danielcopper/memex-mcp/issues/36)) ([9b5d4ea](https://github.com/danielcopper/memex-mcp/commit/9b5d4ea77e72995d4462f9d72e294b55420f7bfa)), closes [#35](https://github.com/danielcopper/memex-mcp/issues/35)
+
 ## [0.5.1](https://github.com/danielcopper/memex-mcp/compare/v0.5.0...v0.5.1) (2026-10-19)
 
 
