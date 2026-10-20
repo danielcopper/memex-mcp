@@ -1221,3 +1221,136 @@ def test_issuers_apart_only_by_a_trailing_slash_are_the_same(
     assert _refusal(raw) == (
         "[[auth.extra_issuers]] entry 1 issuer repeats the issuer of [auth] issuer"
     )
+
+
+# -- keep_alive: seconds or a duration, as Ollama reads it --------------------
+
+
+def test_keep_alive_is_unset_by_default(tmp_path: Path) -> None:
+    assert build_config(raw_config(tmp_path), {}).embeddings.keep_alive == ""
+    assert load_config(EXAMPLE, env={}).embeddings.keep_alive == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "read"),
+    [
+        (300, "300s"),
+        (1.5, "1.5s"),
+        (0, "0s"),
+        (-1, "-1s"),
+        (86400, "86400s"),
+        (-86400, "-1s"),
+        (-1e-10, "-1s"),
+        (-0.0, "-0s"),
+        (1e-05, "0.00001s"),
+        (1e3, "1000s"),
+        ("30m", "30m"),
+        ("1h30m", "1h30m"),
+        ("-1m", "-1s"),
+        ("-0.5ns", "-1s"),
+        ("+24h", "+24h"),
+        (".5s", ".5s"),
+        ("1.5h", "1.5h"),
+        ("86400000ms", "86400000ms"),
+        ("2us", "2us"),
+        ("2\u00b5s", "2\u00b5s"),
+        ("2\u03bcs", "2\u03bcs"),
+        ("3ns", "3ns"),
+        ("", ""),
+    ],
+    ids=repr,
+)
+def test_keep_alive_takes_seconds_or_a_duration(tmp_path: Path, value: object, read: str) -> None:
+    raw = raw_config(tmp_path)
+    raw["embeddings"]["keep_alive"] = value
+    assert build_config(raw, {}).embeddings.keep_alive == read
+
+
+@pytest.mark.parametrize(
+    ("value", "read"),
+    [
+        ("300", "300s"),
+        ("-1", "-1s"),
+        ("0", "0s"),
+        ("1.5", "1.5s"),
+        ("1e3", "1000s"),
+        ("2.5E-1", "0.25s"),
+        ("-1e-10", "-1s"),
+        ("30m", "30m"),
+        (" 30m\n", "30m"),
+    ],
+    ids=repr,
+)
+def test_keep_alive_comes_from_the_environment(tmp_path: Path, value: str, read: str) -> None:
+    env = {"MEMEX_EMBEDDINGS_KEEP_ALIVE": value}
+    assert build_config(raw_config(tmp_path), env).embeddings.keep_alive == read
+
+
+NOT_A_DURATION = "must be a number of seconds or a duration such as '30m'"
+KEEP_ALIVE_BOUND = "must be at least -86400 and at most 86400 seconds"
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (True, f"{NOT_A_DURATION}, got True"),
+        ([300], f"{NOT_A_DURATION}, got [300]"),
+        ("1d", f"{NOT_A_DURATION}, got '1d'"),
+        ("30M", f"{NOT_A_DURATION}, got '30M'"),
+        ("30 m", f"{NOT_A_DURATION}, got '30 m'"),
+        ("m", f"{NOT_A_DURATION}, got 'm'"),
+        ("-", f"{NOT_A_DURATION}, got '-'"),
+        ("1e3s", f"{NOT_A_DURATION}, got '1e3s'"),
+        ("inf", f"{NOT_A_DURATION}, got 'inf'"),
+        ("1.2.3s", f"{NOT_A_DURATION}, got '1.2.3s'"),
+        ("1h-30m", f"{NOT_A_DURATION}, got '1h-30m'"),
+        (86400.001, f"{KEEP_ALIVE_BOUND}, got 86400.001"),
+        (-86401, f"{KEEP_ALIVE_BOUND}, got -86401"),
+        ("24h1ns", f"{KEEP_ALIVE_BOUND}, got '24h1ns'"),
+        ("-25h", f"{KEEP_ALIVE_BOUND}, got '-25h'"),
+        ("86400001ms", f"{KEEP_ALIVE_BOUND}, got '86400001ms'"),
+        ("9" * 20 + "h", f"{KEEP_ALIVE_BOUND}, got '{'9' * 20}h'"),
+        (float("inf"), "must be a finite number, got inf"),
+        (float("nan"), "must be a finite number, got nan"),
+        pytest.param(HUGE, "is too large, got <int too long to show>", id="HUGE"),
+    ],
+    ids=repr,
+)
+def test_an_invalid_keep_alive_is_refused(tmp_path: Path, value: object, message: str) -> None:
+    raw = raw_config(tmp_path)
+    raw["embeddings"]["keep_alive"] = value
+    assert _refusal(raw) == f"[embeddings] keep_alive {message}"
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("true", f"{NOT_A_DURATION}, got 'true'"),
+        ("1d", f"{NOT_A_DURATION}, got '1d'"),
+        ("86401", f"{KEEP_ALIVE_BOUND}, got '86401'"),
+        ("-86400.5", f"{KEEP_ALIVE_BOUND}, got '-86400.5'"),
+        ("-8.64001e4", f"{KEEP_ALIVE_BOUND}, got '-8.64001e4'"),
+        ("1e999", "is too large, got '1e999'"),
+        ("9" * 400, f"is too large, got '{'9' * 76}..."),
+    ],
+    ids=repr,
+)
+def test_an_invalid_keep_alive_from_the_environment_is_refused(
+    tmp_path: Path, value: str, message: str
+) -> None:
+    env = {"MEMEX_EMBEDDINGS_KEEP_ALIVE": value}
+    assert _refusal(raw_config(tmp_path), env) == (
+        f"[embeddings] keep_alive from MEMEX_EMBEDDINGS_KEEP_ALIVE {message}"
+    )
+
+
+@pytest.mark.parametrize("value", ["300", " -1 ", "0", "1.5", "1e3"])
+def test_a_quoted_keep_alive_without_a_unit_comes_only_from_the_environment(
+    tmp_path: Path, value: str
+) -> None:
+    raw = raw_config(tmp_path)
+    raw["embeddings"]["keep_alive"] = value
+    assert _refusal(raw) == (
+        "[embeddings] keep_alive must be a number without quotes or a duration with a unit, "
+        f"got {value!r}"
+    )

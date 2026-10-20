@@ -182,6 +182,7 @@ start.
 | `embeddings.dimensions`                                    | `1024`                                     | vector size of the model; changing model or size drops the stored vectors |
 | `embeddings.query_timeout_seconds`                         | `3`                                        | a search's embedding call must finish within this, else keywords only     |
 | `embeddings.retry_after_seconds`                           | `60`                                       | how long searches skip the embedder after a failure                       |
+| `embeddings.keep_alive`                                    | Ollama's own (`OLLAMA_KEEP_ALIVE`)         | how long Ollama keeps the model, and its GPU memory, loaded after a call  |
 | `write.enabled`                                            | `false`                                    | offer the write tools; needs a remote the server may push to              |
 | `write.max_note_bytes`                                     | `65536`                                    | the largest a note may be after a write through the server, in bytes      |
 | `write.author_email`                                       | `{username}@memex.invalid`                 | commit author's e-mail; `{username}` becomes the caller's username        |

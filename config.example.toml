@@ -105,6 +105,12 @@ index_timeout_seconds = 120.0
 retry_after_seconds = 60.0
 # Whole number, 1 to 2147483647.
 batch_size = 32
+# Sent to Ollama as keep_alive with every embedding call: how long it keeps
+# the model loaded afterwards. Seconds as a number, or a duration such as
+# "30m" or "1h30m" (units h, m, s, ms, us, ns), at most one day either way;
+# a negative value keeps the model loaded, 0 unloads it at once. Unset,
+# Ollama's own default applies.
+# keep_alive = "30m"
 
 [write]
 # Off (the default), the server offers no write tools and only fast-forwards

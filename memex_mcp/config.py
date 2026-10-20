@@ -148,6 +148,9 @@ class EmbeddingsConfig:
     # After a failure, searches skip the embedder for this long.
     retry_after_seconds: float = 60.0
     batch_size: int = 32
+    # How long Ollama keeps the model loaded after an embedding call, as Go's
+    # time.ParseDuration reads it ("30m", "-1s"); empty leaves it to Ollama.
+    keep_alive: str = ""
 
 
 @dataclass(frozen=True)
@@ -234,8 +237,36 @@ _BOUNDS: Mapping[tuple[str, str], _Bound] = {
     ("embeddings", "index_timeout_seconds"): _Bound(MIN_TIMEOUT_SECONDS, high=MAX_SECONDS),
     ("embeddings", "retry_after_seconds"): _Bound(0, high=MAX_SECONDS),
     ("embeddings", "batch_size"): _Bound(1, high=MAX_WHOLE),
+    ("embeddings", "keep_alive"): _Bound(-MAX_SECONDS, high=MAX_SECONDS),
     ("write", "max_note_bytes"): _Bound(1, high=MAX_WHOLE),
 }
+
+# The settings that take a duration as Ollama reads it: seconds as a number, or
+# a string Go's time.ParseDuration reads, such as "30m"; empty means unset.
+_DURATIONS = frozenset({("embeddings", "keep_alive")})
+# A decimal number without sign or exponent, as Go's time.ParseDuration reads one.
+_UNSIGNED = r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)"
+# A number of seconds, which a duration may also be; it may have an exponent,
+# as a number setting may.
+_SECONDS = re.compile(rf"[+-]?{_UNSIGNED}(?:[eE][+-]?[0-9]+)?")
+# Go's duration units, in seconds; "us" may also be written with the micro
+# sign or the Greek mu.
+_DURATION_UNITS: Mapping[str, float] = {
+    "h": 3600,
+    "m": 60,
+    "s": 1,
+    "ms": 1e-3,
+    "us": 1e-6,
+    "\u00b5s": 1e-6,
+    "\u03bcs": 1e-6,
+    "ns": 1e-9,
+}
+# Longer units first, so that "ms" is not read as "m".
+_UNIT = "|".join(sorted(_DURATION_UNITS, key=len, reverse=True))
+_DURATION_PART = re.compile(rf"({_UNSIGNED})({_UNIT})")
+# What time.ParseDuration reads, but for "0" without a unit: a sign, then one
+# or more numbers, each with its unit, such as "1h30m".
+_DURATION = re.compile(rf"[+-]?(?:{_DURATION_PART.pattern})+")
 
 # What int() reads as a decimal whole number; it refuses one only past its
 # digit limit.
@@ -372,8 +403,13 @@ def _coerce_strings(where: str, value: object) -> tuple[str, ...]:
     raise ConfigError(f"{where} must be a list of strings")
 
 
-def _refuse_quoted(where: str, value: object, default: object) -> None:
+def _refuse_quoted(where: str, value: object, default: object, *, duration: bool = False) -> None:
     """Refuse a quoted number or boolean in the file; only the environment gives strings."""
+    if duration and isinstance(value, str) and _SECONDS.fullmatch(value.strip()):
+        raise ConfigError(
+            f"{where} must be a number without quotes or a duration with a unit, "
+            + f"got {_shown(value)}"
+        )
     if not isinstance(value, str) or not isinstance(default, bool | int | float):
         return
     if isinstance(default, bool):
@@ -383,7 +419,40 @@ def _refuse_quoted(where: str, value: object, default: object) -> None:
     raise ConfigError(f"{where} must be {kind} without quotes, got {_shown(value)}")
 
 
+def _duration_seconds(text: str) -> float:
+    """How long ``text``, which _DURATION matches, lasts in seconds, negative after a "-"."""
+    parts = cast("list[tuple[str, str]]", _DURATION_PART.findall(text))
+    seconds = sum(float(number) * _DURATION_UNITS[unit] for number, unit in parts)
+    return -seconds if text.startswith("-") else seconds
+
+
+def _coerce_duration(where: str, value: object, bound: _Bound) -> str:
+    """A duration as Go's time.ParseDuration reads it; a number counts seconds, empty is unset."""
+    text = value.strip() if isinstance(value, str) else None
+    if text == "":
+        return ""
+    if text is not None and _DURATION.fullmatch(text):
+        seconds = _duration_seconds(text)
+    elif (text is not None and _SECONDS.fullmatch(text)) or (
+        isinstance(value, int | float) and not isinstance(value, bool)
+    ):
+        seconds = _coerce_float(where, value)
+        # time.ParseDuration takes no exponent and counts whole nanoseconds.
+        text = f"{seconds:.9f}".rstrip("0").rstrip(".") + "s"
+    else:
+        raise ConfigError(
+            f"{where} must be a number of seconds or a duration such as '30m', got {_shown(value)}"
+        )
+    if not bound.holds(seconds):
+        raise ConfigError(f"{where} must be {bound} seconds, got {_shown(value)}")
+    # Any negative value keeps the model loaded, but time.ParseDuration reads one
+    # shorter than a nanosecond as 0, which unloads it.
+    return "-1s" if seconds < 0 else text
+
+
 def _coerce(section: str, key: str, where: str, value: object, default: object) -> object:
+    if (section, key) in _DURATIONS:
+        return _coerce_duration(where, value, _BOUNDS[section, key])
     if isinstance(default, bool):
         return _coerce_bool(where, value)
     if isinstance(default, int | float):
@@ -429,7 +498,7 @@ def _section[S: DataclassInstance](
         if env_name in origins.env:
             values[f.name] = _coerce(name, f.name, where, origins.env[env_name], default)
         elif f.name in table:
-            _refuse_quoted(where, table[f.name], default)
+            _refuse_quoted(where, table[f.name], default, duration=(name, f.name) in _DURATIONS)
             values[f.name] = _coerce(name, f.name, where, table[f.name], default)
     return replace(defaults, **values)
 

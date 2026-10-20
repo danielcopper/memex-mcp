@@ -30,7 +30,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     embeddings = config.embeddings
     embedder = (
-        OllamaEmbedder(embeddings.url, embeddings.model, embeddings.dimensions)
+        OllamaEmbedder(
+            embeddings.url, embeddings.model, embeddings.dimensions, embeddings.keep_alive
+        )
         if embeddings.enabled
         else None
     )
