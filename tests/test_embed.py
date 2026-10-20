@@ -8,13 +8,15 @@ import json
 import re
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import cast
 
 import httpx2
 import pytest
 
+from memex_mcp.config import build_config
 from memex_mcp.embed import EmbeddingError, OllamaEmbedder
-from tests.conftest import Trickle, streamed
+from tests.conftest import Trickle, raw_config, streamed
 
 
 def raw_answer(body: bytes) -> httpx2.Response:
@@ -517,6 +519,55 @@ def test_a_compressed_answer_is_not_decoded_while_the_deadline_runs() -> None:
     assert time.monotonic() - started < 1.0
 
 
+# -- keep_alive ------------------------------------------------------------
+
+
+def configured(
+    tmp_path: Path, handler: httpx2.MockTransport, **embeddings: object
+) -> OllamaEmbedder:
+    """Ollama on ``handler``, with keep_alive as a config with ``embeddings`` reads it."""
+    raw = raw_config(tmp_path)
+    raw["embeddings"].update(embeddings)
+    keep_alive = build_config(raw, {}).embeddings.keep_alive
+    return OllamaEmbedder(
+        "http://ollama.example.org:11434/", "bge-m3", 3, keep_alive, transport=streamed(handler)
+    )
+
+
+def recorded(bodies: list[object]) -> httpx2.MockTransport:
+    """A transport that records each request's JSON body and answers one vector."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        bodies.append(cast("object", json.loads(request.content)))
+        return httpx2.Response(200, json={"embeddings": [[1, 0, 0]]})
+
+    return httpx2.MockTransport(handler)
+
+
+@pytest.mark.parametrize(
+    ("value", "sent"),
+    [(1800, "1800s"), (1.5, "1.5s"), (0, "0s"), (-1, "-1s"), ("30m", "30m"), ("-1m", "-1s")],
+    ids=repr,
+)
+def test_every_embedding_call_sends_the_configured_keep_alive(
+    tmp_path: Path, value: object, sent: str
+) -> None:
+    bodies: list[object] = []
+    ollama = configured(tmp_path, recorded(bodies), keep_alive=value)
+    _ = ollama.embed(["a"], timeout=1.0)
+    _ = ollama.embed(["b"], timeout=1.0)
+    assert bodies == [
+        {"model": "bge-m3", "input": ["a"], "keep_alive": sent},
+        {"model": "bge-m3", "input": ["b"], "keep_alive": sent},
+    ]
+
+
+def test_no_keep_alive_is_sent_while_it_is_unset(tmp_path: Path) -> None:
+    bodies: list[object] = []
+    _ = configured(tmp_path, recorded(bodies)).embed(["a"], timeout=1.0)
+    assert bodies == [{"model": "bge-m3", "input": ["a"]}]
+
+
 # -- the check: Ollama's model list ---------------------------------------
 
 
@@ -551,6 +602,19 @@ def test_the_check_reads_the_model_list_and_loads_nothing() -> None:
     checker(httpx2.MockTransport(handler)).check(timeout=1.0)
     assert [(r.method, r.url.path, r.content) for r in requests] == [("GET", "/api/tags", b"")]
     assert requests[0].headers["accept-encoding"] == "identity"
+
+
+def test_the_check_sends_no_keep_alive(tmp_path: Path) -> None:
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, json=listing("bge-m3:latest"))
+
+    configured(tmp_path, httpx2.MockTransport(handler), keep_alive="30m").check(timeout=1.0)
+    assert [(r.method, str(r.url), r.content) for r in requests] == [
+        ("GET", "http://ollama.example.org:11434/api/tags", b"")
+    ]
 
 
 @pytest.mark.parametrize(

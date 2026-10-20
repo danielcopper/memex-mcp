@@ -241,10 +241,14 @@ class OllamaEmbedder:
         url: str,
         model: str,
         dimensions: int,
+        keep_alive: str = "",
         transport: httpx2.BaseTransport | None = None,
     ) -> None:
         self.model: str = model
         self.dimensions: int = dimensions
+        # How long Ollama keeps the model loaded after an embedding call; empty leaves it to
+        # Ollama. The check loads no model and so never sends it.
+        self.keep_alive: str = keep_alive
         # The answer is read undecoded, so it must not be compressed.
         self._client: httpx2.Client = httpx2.Client(
             base_url=url.rstrip("/"),
@@ -293,9 +297,10 @@ class OllamaEmbedder:
         if not texts:
             return []
         limit = len(texts) * self.dimensions * _BYTES_PER_VALUE + _ANSWER_ALLOWANCE
-        vectors = self._answer(
-            "/api/embed", "embeddings", limit, timeout, {"model": self.model, "input": texts}
-        )
+        request: dict[str, object] = {"model": self.model, "input": texts}
+        if self.keep_alive:
+            request["keep_alive"] = self.keep_alive
+        vectors = self._answer("/api/embed", "embeddings", limit, timeout, request)
         if not isinstance(vectors, list):
             raise EmbeddingError(f"embeddings is {json_kind(vectors)}, not a list")
         items = cast("list[object]", vectors)
