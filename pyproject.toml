@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 # exactly, so the image, CI and a local `mise run setup` run the same releases.
 dependencies = [
     "anyio==4.15.1",
-    "fastmcp==4.1.0",
+    "fastmcp==4.1.2",
     "httpx2==2.13.1",
     "pydantic==2.14.1",
     "pyjwt[crypto]==2.15.1",
